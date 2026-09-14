@@ -19,3 +19,5 @@ demo/.gitmodules
 
 # ZCode local session files
 .zcode/
+
+plan.md
