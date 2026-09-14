@@ -40,6 +40,26 @@ ledger. Deduplicate against the index and era map first. Pre-screen FAILs print
 a hint to `close --disposition INELIGIBLE --reason ... --evidence ...`; UNKNOWNs
 become blockers — neither is a technical refutation.
 
+### Batch discovery from audit outputs (optional)
+
+`ingest` bridges arbitrary audit skills to the register entry point by NAME
+only — it never parses contents:
+
+```bash
+lc ingest --case-root <dir> [--scan-dir DIR] [--pattern audit] [--json]
+```
+
+It scans a directory (default: the current one) for files or directories whose
+name contains the pattern, skipping hidden/junk dirs and the case root itself.
+A matching directory becomes one bundle; a matching file is a standalone
+source. Each bundle scaffolds a draft `ingest/finding-source.<slug>.yaml`
+listing the source files (absolute paths, copied into evidence at register
+time). Complete every TODO in the draft — one file per distinct root cause —
+resolve the duplication prescreen to PASS, then `register --from` each.
+`register` rejects unresolved TODO fields by design: discovery is mechanical,
+the claim and the dedup judgment stay with you. Rerunning `ingest` is
+idempotent (existing drafts are skipped).
+
 ## 1. Prior-art check (→ PRIOR_ART_CHECKED)
 
 Dedup against the project's own published audits BEFORE investing in

@@ -22,6 +22,8 @@ LC="python3 <skill-root>/scripts/lifecycle.py"
 
 $LC init --case-root <dir> --program-yaml <skill-root>/templates/program.yaml \
          --rules-snapshot rules.md            # 0. setup (fill program.yaml!)
+$LC ingest    --case-root <dir>          # optional: find *audit* files/dirs in CWD,
+                                           # scaffold TODO drafts under <root>/ingest/
 $LC register --case-root <dir> --from finding-source.yaml
 $LC check    --case-root <dir> --id F-…       # preview the next gate (read-only)
 $LC advance  --case-root <dir> --id F-… --reviewer <who> \

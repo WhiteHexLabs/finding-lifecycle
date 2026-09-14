@@ -105,6 +105,9 @@ commands take `--expected-revision` (compare-and-swap against the ledger).
 
 ```text
 init       --case-root D [--program-yaml P] [--program-id X] [--rules-snapshot F]
+ingest     --case-root D [--scan-dir DIR] [--pattern audit] [--json]
+           name-based discovery of audit artifacts -> TODO drafts under <root>/ingest/;
+           no content parsing; `register` rejects unresolved TODO fields
 register   --case-root D --from finding-source.yaml [--json]
 check      --case-root D --id F [--stage S] [--input P] [--json]
 advance    --case-root D --id F --reviewer R --reason T [--input P] --expected-revision N

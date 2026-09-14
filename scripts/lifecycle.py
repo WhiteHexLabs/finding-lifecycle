@@ -1336,6 +1336,14 @@ def render_finding_body(inp: dict, fid: str, program_id: str) -> str:
     return "\n".join(lines)
 
 
+def reject_todo(label: str, value) -> None:
+    """Reject unresolved `ingest` draft placeholders."""
+    if isinstance(value, str) and value.strip().upper().startswith("TODO"):
+        raise LifecycleError(
+            f"finding source: {label} is an unresolved TODO; complete the ingest draft "
+            "before registering")
+
+
 def cmd_register(a) -> int:
     root = require_case(a)
     program = load_program(root)
@@ -1344,6 +1352,8 @@ def cmd_register(a) -> int:
                   "finding source")
     title = as_str(inp.get("title"), "finding source: title")
     claim = as_str(inp.get("claim"), "finding source: claim")
+    reject_todo("title", title)
+    reject_todo("claim", claim)
     if inp.get("program_id") is not None and inp["program_id"] != program["program"]["id"]:
         raise LifecycleError(
             f"finding source program_id {inp['program_id']!r} != case program {program['program']['id']!r}")
@@ -1351,6 +1361,7 @@ def cmd_register(a) -> int:
     sources = as_dict(inp.get("sources") or {}, "finding source: sources")
     if not (sources.get("auditor") or sources.get("original_finding_id") or sources.get("files")):
         raise LifecycleError("finding source: sources must include auditor, original_finding_id, or files (traceable origin)")
+    reject_todo("sources.auditor", sources.get("auditor"))
 
     prescreen = as_list(inp.get("prescreen") or [], "finding source: prescreen")
     aspects = {}
@@ -1361,6 +1372,8 @@ def cmd_register(a) -> int:
                             f"finding source: prescreen[{i}].status")
         as_str(item.get("evidence"), f"finding source: prescreen[{i}].evidence")
         as_str(item.get("explanation"), f"finding source: prescreen[{i}].explanation")
+        reject_todo(f"prescreen[{i}].evidence", item.get("evidence"))
+        reject_todo(f"prescreen[{i}].explanation", item.get("explanation"))
         aspects[aspect] = status
     missing_aspects = REQUIRED_PRESCREEN - set(aspects)
     if missing_aspects:
@@ -1441,6 +1454,121 @@ def cmd_register(a) -> int:
     if fail_aspects:
         lines.append(f"NOTE: pre-screen FAIL on {fail_aspects}; close as INELIGIBLE with evidence if confirmed")
     emit({"lines": lines, "id": fid, "revision": doc["revision"]}, a.json)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# ingest: name-based discovery of audit artifacts
+
+JUNK_DIR_NAMES = {".git", ".idea", ".zcode", ".vscode", "node_modules", "out",
+                  "cache", "lib", "target", "__pycache__", "broadcast"}
+SKIP_FILE_EXTS = {".zip", ".tar", ".gz", ".7z", ".tgz", ".png", ".jpg", ".jpeg",
+                  ".gif", ".svg", ".ico", ".lock", ".bin", ".db"}
+
+
+def _inside(root_real: str, p: str) -> bool:
+    return p == root_real or p.startswith(root_real + os.sep)
+
+
+def _scannable_file(name: str) -> bool:
+    if name.startswith("."):
+        return False
+    ext = os.path.splitext(name)[1].lower()
+    return ext not in SKIP_FILE_EXTS
+
+
+def render_ingest_draft(origin: str, files, pattern: str) -> str:
+    base = os.path.basename(origin.rstrip(os.sep)) or origin
+    file_lines = "\n".join(
+        f'    - path: "{f}"\n      note: "discovered by ingest (name matched \'{pattern}\')"'
+        for f in files)
+    return f'''# Draft scaffolded by `ingest` from: {origin}
+# Discovery is NAME-BASED ONLY — nothing here has been parsed or judged.
+# Complete every TODO, split into ONE FILE PER FINDING if the source contains
+# several distinct root causes, then register each completed file:
+#   lifecycle.py register --case-root <root> --from <this-file>
+# `register` rejects unresolved TODO fields by design.
+title: "TODO: one-line vulnerability claim ({base})"
+claim: "TODO: what the vulnerability is, on which deployment, under which preconditions"
+sources:
+  auditor: "TODO: which audit skill / session produced this"
+  original_finding_id: null
+  audit_round: null
+  files:
+{file_lines}
+prescreen:
+  - {{aspect: scope, status: UNKNOWN, evidence: "TODO", explanation: "TODO: is the target within program scope"}}
+  - {{aspect: authority, status: UNKNOWN, evidence: "TODO", explanation: "TODO: does the attack require any privileged role"}}
+  - {{aspect: exclusion, status: UNKNOWN, evidence: "TODO", explanation: "TODO: does any exclusion clause apply"}}
+  - {{aspect: duplication, status: UNKNOWN, evidence: "TODO", explanation: "TODO: check index.md and prior findings; must become PASS before registering"}}
+targets: []
+'''
+
+
+def cmd_ingest(a) -> int:
+    root = require_case(a)
+    root_real = os.path.realpath(root)
+    scan = os.path.realpath(a.scan_dir or os.getcwd())
+    if not os.path.isdir(scan):
+        raise LifecycleError(f"--scan-dir not found: {a.scan_dir!r}")
+    pattern = (a.pattern or "audit").strip().lower()
+    if not pattern:
+        raise LifecycleError("--pattern must not be empty")
+
+    bundles = []  # [{origin, files}]
+    for dirpath, dirnames, filenames in os.walk(scan):
+        dirnames[:] = [d for d in sorted(dirnames)
+                       if d not in JUNK_DIR_NAMES and not d.startswith(".")
+                       and not _inside(root_real, os.path.realpath(os.path.join(dirpath, d)))]
+        rel = os.path.relpath(dirpath, scan)
+        comps = [] if rel == "." else rel.split(os.sep)
+        dir_matched = any(pattern in c.lower() for c in comps)
+        if dir_matched:
+            owner = next((b["origin"] for b in bundles
+                          if dirpath.startswith(b["origin"] + os.sep)), None)
+            if owner is None:
+                bundles.append({"origin": dirpath, "files": []})
+                owner = dirpath
+            bundle = next(b for b in bundles if b["origin"] == owner)
+            bundle["files"].extend(
+                os.path.join(dirpath, f) for f in sorted(filenames)
+                if _scannable_file(f))
+        else:
+            for f in sorted(filenames):
+                if pattern in f.lower() and _scannable_file(f):
+                    bundles.append({"origin": os.path.join(dirpath, f),
+                                    "files": [os.path.join(dirpath, f)]})
+    bundles = [b for b in bundles if b["files"]]
+
+    ingest_dir = os.path.join(root, "ingest")
+    os.makedirs(ingest_dir, exist_ok=True)
+    lines = [f"scanned {scan} for *{pattern}*: {len(bundles)} bundle(s) found"]
+    drafts = []
+    for b in bundles:
+        origin = b["origin"]
+        slug = re.sub(r"[^0-9A-Za-z]+", "-", os.path.basename(origin.rstrip(os.sep)))
+        slug = (slug.strip("-").lower() or "bundle")[:40]
+        tag = sha256_bytes(origin.encode("utf-8"))[:8]
+        name = f"finding-source.{slug}-{tag}.yaml"
+        draft_path = os.path.join(ingest_dir, name)
+        if os.path.exists(draft_path):
+            lines.append(f"  draft exists (skipped): ingest/{name} <- {origin}")
+            drafts.append({"draft": f"ingest/{name}", "origin": origin,
+                           "files": b["files"], "status": "exists"})
+            continue
+        with open(draft_path, "w", encoding="utf-8") as f:
+            f.write(render_ingest_draft(origin, b["files"], pattern))
+        lines.append(f"  draft: ingest/{name} <- {origin} ({len(b['files'])} file(s))")
+        drafts.append({"draft": f"ingest/{name}", "origin": origin,
+                       "files": b["files"], "status": "created"})
+    if bundles:
+        lines.append("next: complete every TODO in the drafts (one file per finding), "
+                     "set the duplication prescreen to PASS, then `register --from` each")
+    else:
+        lines.append("nothing matched; pass --pattern to search for other name substrings")
+    emit({"lines": lines, "scan": scan, "pattern": pattern,
+          "bundles": [{"origin": b["origin"], "files": b["files"]} for b in bundles],
+          "drafts": drafts}, a.json)
     return EXIT_OK
 
 
@@ -2010,6 +2138,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rules-snapshot", help="copy the rules snapshot into the root and freeze its hash")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_init)
+
+    sp = sub.add_parser("ingest",
+                        help="discover audit artifacts by name and scaffold finding-source drafts")
+    sp.add_argument("--case-root", required=True)
+    sp.add_argument("--scan-dir", help="directory to scan (default: current directory)")
+    sp.add_argument("--pattern", default="audit",
+                    help="name substring to match files/directories (default: audit)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_ingest)
 
     sp = sub.add_parser("register", help="register a finding from an original source")
     sp.add_argument("--case-root", required=True)
