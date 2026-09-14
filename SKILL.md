@@ -1,6 +1,6 @@
 ---
 name: finding-lifecycle
-description: Post-discovery lifecycle for smart-contract vulnerability findings — track each candidate finding from registration through cross-check, fork proof, triage, packaging, independent self-review and submission, with evidence gates enforced by a CLI. Use when a vulnerability finding exists (from any audit) and must be verified, dispositioned and submitted to a bounty program without public disclosure.
+description: Post-discovery lifecycle for smart-contract vulnerability findings — track each candidate finding from registration through cross-check, fork proof, triage, packaging, independent self-review and submission, with evidence gates enforced by a CLI. By default it auto-discovers audit artifacts in the working directory by name (ingest) and scaffolds finding drafts. Use when a vulnerability finding exists (from any audit) and must be verified, dispositioned and submitted to a bounty program without public disclosure.
 ---
 
 # finding-lifecycle
@@ -15,6 +15,23 @@ report's remediation attachment; PoCs use separate attack contracts) · never
 disclose publicly (private repos / platform private attachments only; no secret
 gists) · never fabricate passage — there is no `--force`.
 
+## Default entry: auto-discovery (do this first)
+
+Whenever the skill starts and findings need to enter the lifecycle, the
+DEFAULT move is automatic discovery in the session's current directory —
+no need to point at files or hand-write finding sources:
+
+1. If no case root exists yet: `init` one (fill program.yaml).
+2. Run `$LC ingest --case-root <dir>` — scans the CURRENT directory for
+   files/directories whose name contains `audit` (override with
+   `--pattern` / `--scan-dir`) and scaffolds one TODO draft per bundle
+   under `<root>/ingest/`. Idempotent: rerun on every pickup; existing
+   drafts are skipped, so newly produced audit outputs get picked up.
+3. Complete each draft (one per distinct root cause; fill every TODO, set
+   the duplication prescreen to PASS — `register` rejects TODOs by design),
+   then `register --from` each. Hand-written finding-source.yaml remains
+   the manual fallback.
+
 ## Quick start
 
 ```bash
@@ -22,9 +39,9 @@ LC="python3 <skill-root>/scripts/lifecycle.py"
 
 $LC init --case-root <dir> --program-yaml <skill-root>/templates/program.yaml \
          --rules-snapshot rules.md            # 0. setup (fill program.yaml!)
-$LC ingest    --case-root <dir>          # optional: find *audit* files/dirs in CWD,
-                                           # scaffold TODO drafts under <root>/ingest/
-$LC register --case-root <dir> --from finding-source.yaml
+$LC ingest    --case-root <dir>               # 1. DEFAULT: find *audit* files/dirs
+                                           #    in CWD -> TODO drafts under <root>/ingest/
+$LC register --case-root <dir> --from <root>/ingest/finding-source.xxx.yaml
 $LC check    --case-root <dir> --id F-…       # preview the next gate (read-only)
 $LC advance  --case-root <dir> --id F-… --reviewer <who> \
              --reason "<substantive note citing an evidence path>" \
@@ -53,6 +70,9 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
 
 ## Operating rules
 
+- Default entry is `ingest`: auto-discover *audit*-named artifacts in the
+  working directory, complete the scaffolded drafts, register. Rerun freely —
+  it is idempotent and picks up newly produced audit outputs.
 - Before cross-checking any finding, dedup it against the project's own audit
   reports (PRIOR_ART_CHECKED): docs site + program page → download → keyword
   search → record. Overlap closes as INELIGIBLE unless the rules pay for it.

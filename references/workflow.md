@@ -40,10 +40,11 @@ ledger. Deduplicate against the index and era map first. Pre-screen FAILs print
 a hint to `close --disposition INELIGIBLE --reason ... --evidence ...`; UNKNOWNs
 become blockers — neither is a technical refutation.
 
-### Batch discovery from audit outputs (optional)
+### Default entry: batch discovery of audit outputs
 
-`ingest` bridges arbitrary audit skills to the register entry point by NAME
-only — it never parses contents:
+`ingest` is the DEFAULT entry move (run it on every pickup; it is
+idempotent). It bridges arbitrary audit skills to the register entry point
+by NAME only — it never parses contents:
 
 ```bash
 lc ingest --case-root <dir> [--scan-dir DIR] [--pattern audit] [--json]
