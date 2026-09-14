@@ -11,6 +11,8 @@ program:
   id: example-program            # required, stable identifier
   name: Example Protocol Bug Bounty
   rules_url: https://example.com/bounty-rules
+  docs_url: https://docs.example.com          # official docs site; PRIOR_ART_CHECKED starts here
+  bounty_page_url: https://immunefi.com/example  # program page listing audit links
   fetched_at: "2026-01-01"       # date the rules were fetched
   valid_until: null              # rules validity window, null = unknown
   snapshot:                      # frozen rules snapshot (copied into case root)

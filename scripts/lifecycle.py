@@ -40,6 +40,7 @@ except ImportError:  # pragma: no cover
 
 STAGES = [
     "DISCOVERED",
+    "PRIOR_ART_CHECKED",
     "CROSS_CHECKED",
     "FORK_PROVEN",
     "TRIAGED",
@@ -69,12 +70,13 @@ ALLOWED_FM_KEYS = {
     "id", "title", "program_id", "created_at", "updated_at",
     "stage", "disposition", "revision",
     "sources", "targets", "root_cause", "duplicate_of", "refutation",
-    "severity", "program_snapshot",
+    "severity", "program_snapshot", "prior_art",
     "evidence", "gates", "blockers",
     "submission", "appeal", "history",
 }
 
 DEFAULT_INPUTS = {
+    "PRIOR_ART_CHECKED": "evidence/{fid}/prior-art.yaml",
     "CROSS_CHECKED": "evidence/{fid}/cross-check.yaml",
     "FORK_PROVEN": "evidence/{fid}/fork-proof.yaml",
     "TRIAGED": "evidence/{fid}/triage.yaml",
@@ -84,6 +86,12 @@ DEFAULT_INPUTS = {
 }
 
 STAGE_HINTS = {
+    "PRIOR_ART_CHECKED": [
+        "collect audit-report links from the project's official docs site and the bounty platform program page",
+        "download every report into evidence/{fid}/prior-art/ and record its hash",
+        "search each report for the root cause (function names, mechanism keywords); record a result per report",
+        "write evidence/{fid}/prior-art.yaml",
+    ],
     "CROSS_CHECKED": [
         "enumerate affected deployment variants; verify source/proxy/runtime bytecode mapping",
         "attempt to refute the claim on each variant; separate victim damage from attacker profit",
@@ -663,6 +671,109 @@ def load_stage_input(root: str, fid: str, stage: str, override, ctx=None):
 # ---------------------------------------------------------------------------
 # stage verifiers
 
+def verify_prior_art(ctx: Ctx, inp: dict) -> None:
+    """Dedup against the project's own published audit reports.
+
+    Overlap with a published audit usually means a known issue: close as
+    INELIGIBLE with the report + an overlap note as evidence. Continuing is
+    only allowed with an explicit still_eligible rule reference.
+    """
+    restrict_keys(inp, {"discovery", "reports", "checks",
+                        "no_reports_found", "no_reports_note", "conclusion"},
+                  "prior-art.yaml")
+
+    discovery = as_list(inp.get("discovery") or [], "prior-art.yaml: discovery")
+    if not discovery:
+        ctx.issue("incomplete", "prior-art.yaml: discovery missing — record where audit "
+                                "links were looked for (official docs site and/or program page)")
+    for i, d in enumerate(discovery):
+        d = as_dict(d, f"prior-art.yaml: discovery[{i}]")
+        check_enum(d.get("kind"), {"docs_site", "program_page", "other"},
+                   f"prior-art.yaml: discovery[{i}].kind")
+        as_str(d.get("url"), f"prior-art.yaml: discovery[{i}].url")
+        as_str(d.get("fetched_at"), f"prior-art.yaml: discovery[{i}].fetched_at")
+        d.setdefault("note", "")
+
+    reports = as_list(inp.get("reports") or [], "prior-art.yaml: reports")
+    if not reports:
+        declared = inp.get("no_reports_found")
+        note = inp.get("no_reports_note")
+        if declared is not True:
+            ctx.issue("incomplete", "prior-art.yaml: no reports listed; either list the audit "
+                                    "reports found or declare no_reports_found with a note")
+        elif not isinstance(note, str) or not note.strip():
+            ctx.issue("incomplete", "prior-art.yaml: no_reports_found requires no_reports_note "
+                                    "(which channels were checked and what was found)")
+
+    norm_reports = []
+    for i, r in enumerate(reports):
+        r = as_dict(r, f"prior-art.yaml: reports[{i}]")
+        title = as_str(r.get("title"), f"prior-art.yaml: reports[{i}].title")
+        rel = as_str(r.get("path"), f"prior-art.yaml: reports[{i}].path")
+        expected = r.get("sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", expected):
+            raise LifecycleError(f"prior-art.yaml: reports[{i}].sha256 must be a 64-hex digest")
+        ctx.verify_file_hash(rel, expected.removeprefix("0x").lower(), f"prior-art report {title}")
+        ctx.add_path(rel, f"prior-art-report:{title}", "stage:PRIOR_ART_CHECKED")
+        norm_reports.append({"title": title, "path": rel,
+                             "sha256": expected.removeprefix("0x").lower(),
+                             "url": r.get("url"), "auditor": r.get("auditor"),
+                             "date": r.get("date")})
+
+    checks = as_list(inp.get("checks") or [], "prior-art.yaml: checks")
+    by_report = {}
+    for i, c in enumerate(checks):
+        c = as_dict(c, f"prior-art.yaml: checks[{i}]")
+        ref = as_str(c.get("report"), f"prior-art.yaml: checks[{i}].report")
+        result = check_enum(c.get("result"), {"NO_MATCH", "MATCH", "PARTIAL", "NOT_SEARCHABLE"},
+                            f"prior-art.yaml: checks[{i}].result")
+        detail = c.get("detail")
+        if not isinstance(detail, str) or not detail.strip():
+            ctx.issue("incomplete", f"prior-art.yaml: checks[{i}] ({ref}): detail missing")
+        searched = as_list(c.get("searched_for") or [], f"prior-art.yaml: checks[{i}].searched_for")
+        if not searched:
+            ctx.issue("incomplete", f"prior-art.yaml: checks[{i}] ({ref}): searched_for missing — "
+                                    "record the root-cause keywords used")
+        if result == "NOT_SEARCHABLE":
+            ctx.issue("incomplete", f"prior-art.yaml: checks[{i}] ({ref}): NOT_SEARCHABLE is "
+                                    "unresolved — record a blocker (unknown blocks the gate)")
+        if result in ("MATCH", "PARTIAL"):
+            se = c.get("still_eligible")
+            if not isinstance(se, dict):
+                ctx.issue("incomplete",
+                          f"prior-art.yaml: checks[{i}] ({ref}): {result} with the project's own "
+                          "audit — close as INELIGIBLE with evidence, or provide "
+                          "still_eligible {rule_ref, explanation} if the rules allow it")
+            else:
+                se = as_dict(se, f"prior-art.yaml: checks[{i}].still_eligible")
+                as_str(se.get("rule_ref"), f"prior-art.yaml: checks[{i}].still_eligible.rule_ref")
+                as_str(se.get("explanation"), f"prior-art.yaml: checks[{i}].still_eligible.explanation")
+        if ref in by_report:
+            ctx.issue("invalid", f"prior-art.yaml: duplicate check for report {ref!r}")
+        by_report[ref] = result
+
+    for r in norm_reports:
+        if r["title"] not in by_report:
+            ctx.issue("incomplete", f"prior-art.yaml: no check recorded for report {r['title']!r}")
+    for ref in by_report:
+        if ref not in {r["title"] for r in norm_reports}:
+            ctx.issue("invalid", f"prior-art.yaml: check references unknown report {ref!r}")
+
+    conclusion = check_enum(inp.get("conclusion"), {"NEW", "KNOWN"}, "prior-art.yaml: conclusion")
+    if conclusion == "KNOWN":
+        ctx.issue("incomplete", "prior-art.yaml: conclusion KNOWN — close as INELIGIBLE with the "
+                                "overlap evidence instead of advancing")
+
+    merged = {
+        "checked_at": now_iso(),
+        "conclusion": conclusion,
+        "discovery": discovery,
+        "reports": norm_reports,
+    }
+    ctx.merges["prior_art"] = merged
+    ctx.add_field("prior_art", merged)
+
+
 def verify_cross_check(ctx: Ctx, inp: dict) -> None:
     restrict_keys(inp, {"targets", "root_cause", "refutation_attempts",
                         "damage_vs_profit", "assessment", "uncovered_variants"},
@@ -1080,6 +1191,7 @@ def verify_submission_block(ctx: Ctx, sub: dict, record_mode: bool = False) -> N
 
 
 VERIFIERS = {
+    "PRIOR_ART_CHECKED": verify_prior_art,
     "CROSS_CHECKED": verify_cross_check,
     "FORK_PROVEN": verify_fork_proof,
     "TRIAGED": verify_triage,
@@ -1099,6 +1211,8 @@ def check_review_substance(reviewer: str, reason: str, ctx: Ctx) -> None:
         if "path" in inp:
             tokens.append(inp["path"])
             tokens.append(os.path.basename(inp["path"]))
+    if not tokens:
+        return  # no artifacts consumed by this gate; length check above suffices
     for ev in ctx.doc.get("evidence", []):
         if isinstance(ev.get("path"), str):
             tokens.append(ev["path"])
@@ -1215,7 +1329,8 @@ def render_finding_body(inp: dict, fid: str, program_id: str) -> str:
         "",
         "## Next steps",
         "",
-        "- produce `evidence/%s/cross-check.yaml` and `assessment.md`, then advance to CROSS_CHECKED" % fid,
+        "- dedup against the project's published audits: produce `evidence/%s/prior-art.yaml`" % fid,
+        "- then produce `evidence/%s/cross-check.yaml` and `assessment.md`" % fid,
         "",
     ]
     return "\n".join(lines)
@@ -1300,6 +1415,7 @@ def cmd_register(a) -> int:
         "severity": {"candidate": sources.get("candidate_severity"), "final": None,
                      "matrix_entry": None, "justification": None},
         "program_snapshot": {"sha256": None, "checked_at": None},
+        "prior_art": None,
         "evidence": [],
         "gates": [],
         "blockers": [],

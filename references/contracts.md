@@ -28,7 +28,7 @@ consistency conflict and blocks all mutations until repaired.
 | Field | Contract |
 |---|---|
 | `id` | `F-<32 hex>`; assigned at registration; never encodes severity |
-| `stage` | last **passed** stage; one of the seven below |
+| `stage` | last **passed** stage; one of the eight below |
 | `disposition` | closure outcome, independent of stage |
 | `revision` | +1 on every CLI write; the basis of compare-and-swap |
 | `sources` | auditor / original finding id / round / copied source docs with hashes |
@@ -37,6 +37,7 @@ consistency conflict and blocks all mutations until repaired.
 | `duplicate_of` | surviving finding; set only by `close MERGED` |
 | `severity` | candidate (inherited) / final + matrix_entry + justification (set at TRIAGED) |
 | `program_snapshot` | frozen rules snapshot hash + check time |
+| `prior_art` | set at PRIOR_ART_CHECKED: `{checked_at, conclusion, discovery[], reports[]}` — the project's own audit reports checked and their local copies |
 | `evidence` | `{path, sha256, purpose, produced_by, recorded_at}`; upserted by path |
 | `gates` | `{id, stage, status: PASSED\|INVALID, at, reviewer, reason, inputs[]}` |
 | `blockers` | `{item, next_step, raised_at, resolved_at}` |
@@ -49,8 +50,8 @@ consistency conflict and blocks all mutations until repaired.
 Stages (one direction only; regress via `reopen`):
 
 ```text
-DISCOVERED → CROSS_CHECKED → FORK_PROVEN → TRIAGED
-          → PACKAGED → SELF_REVIEWED → SUBMITTED
+DISCOVERED → PRIOR_ART_CHECKED → CROSS_CHECKED → FORK_PROVEN
+          → TRIAGED → PACKAGED → SELF_REVIEWED → SUBMITTED
 ```
 
 Dispositions: `OPEN, MERGED, INELIGIBLE, REFUTED, ACCEPTED, REJECTED, WITHDRAWN`.
@@ -64,6 +65,10 @@ Dispositions: `OPEN, MERGED, INELIGIBLE, REFUTED, ACCEPTED, REJECTED, WITHDRAWN`
 - Platform accept/reject reflects the platform outcome only; it does not rewrite
   the technical record, and a new platform decision (e.g. after an appeal) may
   supersede it — prior outcomes stay in `history`.
+
+Compatibility: findings recorded before the PRIOR_ART_CHECKED stage was
+introduced keep their stage; the new gate applies to findings at DISCOVERED.
+Older ledgers without a `prior_art` key remain valid.
 
 ## 3. Gate contract
 
@@ -81,6 +86,7 @@ Stage input documents (default paths, overridable with `--input`):
 
 | Target stage | Input | Machine-checked essentials |
 |---|---|---|
+| PRIOR_ART_CHECKED | `evidence/<id>/prior-art.yaml` | discovery channels recorded (docs site / program page); every audit report present as a local copy with matching hash; one check per report (NO_MATCH with keywords+detail; MATCH/PARTIAL ⇒ close INELIGIBLE or `still_eligible {rule_ref, explanation}`; NOT_SEARCHABLE ⇒ blocker); `no_reports_found` requires an explicit note; conclusion must be NEW |
 | CROSS_CHECKED | `evidence/<id>/cross-check.yaml` | targets (addr + runtime code hash + chain), root_cause.claim, ≥1 refutation attempt, damage≠profit stated, assessment file |
 | FORK_PROVEN | `evidence/<id>/fork-proof.yaml` | fork pinning (chain, block, hash, tool versions, rpc ref), targets covered, cheatcode capabilities each justified, controls (pause/denylist) verified or marked N/A, PoC test+log files, `result: PASS`, every expected assertion present in the log, PnL per side (unknown ⇒ `"unknown"`, never 0) |
 | TRIAGED | `evidence/<id>/triage.yaml` | severity.final == matrix entry level, justification cites a recorded evidence path, every eligibility item PASS/NOT_APPLICABLE with evidence file (UNKNOWN blocks; FAIL ⇒ close INELIGIBLE), novelty search recorded, snapshot hash frozen and matching |

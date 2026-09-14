@@ -145,6 +145,51 @@ class Base(unittest.TestCase):
     def evidence(self, fid, name):
         return os.path.join(self.root, "evidence", fid, name)
 
+    def build_prior_art(self, fid, result="NO_MATCH", still_eligible=None,
+                        no_reports=False, missing_file=False, wrong_hash=False,
+                        conclusion="NEW", checks=None):
+        report_rel = f"evidence/{fid}/prior-art/audit-2025.md"
+        if not no_reports and not missing_file:
+            wfile(os.path.join(self.root, report_rel),
+                  "# 2025 audit\n\nfindings: oracle staleness, governance delay\n")
+        reports = []
+        if not no_reports:
+            reports.append({
+                "title": "2025 audit", "url": "https://example.test/audit-2025.pdf",
+                "auditor": "Firm X", "date": "2025-06-01", "path": report_rel,
+                "sha256": "0" * 64 if (wrong_hash or missing_file)
+                          else sha(os.path.join(self.root, report_rel)),
+            })
+        if checks is None:
+            if no_reports:
+                checks = []
+            else:
+                check = {
+                    "report": "2025 audit",
+                    "searched_for": ["withdraw", "reentrancy", "state update"],
+                    "result": result,
+                    "detail": "no finding shares this root cause" if result == "NO_MATCH"
+                              else "see overlap note",
+                    "location": "p.12 §3.4" if result in ("MATCH", "PARTIAL") else None,
+                }
+                if still_eligible:
+                    check["still_eligible"] = still_eligible
+                checks = [check]
+        wyaml(self.evidence(fid, "prior-art.yaml"), {
+            "discovery": [
+                {"kind": "docs_site", "url": "https://docs.example.test/security",
+                 "fetched_at": "2026-09-14", "note": "audits section"},
+                {"kind": "program_page", "url": "https://platform.test/example",
+                 "fetched_at": "2026-09-14", "note": "audit links"},
+            ],
+            "reports": reports,
+            "checks": checks,
+            "no_reports_found": bool(no_reports),
+            "no_reports_note": "docs site and program page list no audits"
+                               if no_reports else None,
+            "conclusion": conclusion,
+        })
+
     def build_cross_check(self, fid, skip_assessment=False):
         if not skip_assessment:
             wfile(self.evidence(fid, "assessment.md"),
@@ -302,11 +347,15 @@ class Base(unittest.TestCase):
 
     def flow_to(self, fid, target):
         """Advance through all stages up to and including target."""
-        order = ["CROSS_CHECKED", "FORK_PROVEN", "TRIAGED", "PACKAGED",
-                 "SELF_REVIEWED", "SUBMITTED"]
+        order = ["PRIOR_ART_CHECKED", "CROSS_CHECKED", "FORK_PROVEN", "TRIAGED",
+                 "PACKAGED", "SELF_REVIEWED", "SUBMITTED"]
         zip_hash = None
         for stage in order[:order.index(target) + 1]:
-            if stage == "CROSS_CHECKED":
+            if stage == "PRIOR_ART_CHECKED":
+                self.build_prior_art(fid)
+                self.advance(fid, stage,
+                             f"no audit overlap per evidence/{fid}/prior-art/audit-2025.md")
+            elif stage == "CROSS_CHECKED":
                 self.build_cross_check(fid)
                 self.advance(fid, stage,
                              f"cross-checked deployments; see evidence/{fid}/assessment.md")
@@ -348,16 +397,17 @@ class TestScenario1(Base):
         self.assertEqual(fm["disposition"], "OPEN")
         self.assertEqual(fm["severity"]["final"], "HIGH")
         self.assertEqual([g["status"] for g in fm["gates"]],
-                         ["PASSED"] * 6)
+                         ["PASSED"] * 7)
         self.assertEqual(fm["revision"], len(fm["history"]))
 
     def test_missing_assessment_blocks(self):
         fid = self.register()
+        self.flow_to(fid, "PRIOR_ART_CHECKED")
         self.build_cross_check(fid, skip_assessment=True)
         self.advance(fid, "CROSS_CHECKED", f"see evidence/{fid}/assessment.md", code=1)
         fm = read_ledger(self.root, fid)
-        self.assertEqual(fm["stage"], "DISCOVERED")
-        self.assertEqual(fm["revision"], 1)
+        self.assertEqual(fm["stage"], "PRIOR_ART_CHECKED")
+        self.assertEqual(fm["revision"], 2)
 
     def test_missing_run_log_blocks(self):
         fid = self.register()
@@ -370,6 +420,7 @@ class TestScenario1(Base):
 
     def test_unknown_input_keys_rejected(self):
         fid = self.register()
+        self.flow_to(fid, "PRIOR_ART_CHECKED")
         self.build_cross_check(fid)
         path = self.evidence(fid, "cross-check.yaml")
         doc = yaml.safe_load(open(path))
@@ -377,9 +428,132 @@ class TestScenario1(Base):
         wyaml(path, doc)
         r = run(["advance", "--case-root", self.root, "--id", fid,
                  "--reviewer", "t", "--reason", "x" * 40,
-                 "--expected-revision", 1])
+                 "--expected-revision", 2])
         self.assertEqual(r.returncode, 2)
         self.assertIn("unknown key", r.stderr)
+
+
+# ---------------------------------------------------------------------------
+# scenario 11: prior-art dedup against the project's own audit reports
+
+class TestScenarioPriorArt(Base):
+    def test_match_blocks_advance(self):
+        fid = self.register()
+        self.build_prior_art(fid, result="MATCH")
+        r = self.advance(fid, "PRIOR_ART_CHECKED",
+                         f"overlap in evidence/{fid}/prior-art/audit-2025.md", code=1)
+        out = r.stdout + r.stderr
+        self.assertIn("INELIGIBLE", out)
+        fm = read_ledger(self.root, fid)
+        self.assertEqual(fm["stage"], "DISCOVERED")
+
+    def test_match_with_still_eligible_passes(self):
+        fid = self.register()
+        self.build_prior_art(fid, result="MATCH",
+                             still_eligible={"rule_ref": "rules-snapshot.md#known-issues",
+                                             "explanation": "program pays for known-but-unfixed"})
+        self.advance(fid, "PRIOR_ART_CHECKED",
+                     f"overlap allowed by rules; report evidence/{fid}/prior-art/audit-2025.md")
+        fm = read_ledger(self.root, fid)
+        self.assertEqual(fm["stage"], "PRIOR_ART_CHECKED")
+        self.assertEqual(fm["prior_art"]["conclusion"], "NEW")
+        self.assertEqual(len(fm["prior_art"]["reports"]), 1)
+        purposes = [e["purpose"] for e in fm["evidence"]]
+        self.assertTrue(any(p.startswith("prior-art-report:") for p in purposes))
+
+    def test_match_then_close_ineligible(self):
+        fid = self.register()
+        self.build_prior_art(fid, result="MATCH")
+        self.advance(fid, "PRIOR_ART_CHECKED",
+                     f"overlap in evidence/{fid}/prior-art/audit-2025.md", code=1)
+        overlap = wfile(self.evidence(fid, "overlap.md"),
+                        "root cause already reported as finding #3 of the 2025 audit\n")
+        r = run(["close", "--case-root", self.root, "--id", fid,
+                 "--disposition", "INELIGIBLE",
+                 "--reason", "already reported in the project's 2025 audit",
+                 "--evidence", f"evidence/{fid}/overlap.md",
+                 "--expected-revision", 1])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(read_ledger(self.root, fid)["disposition"], "INELIGIBLE")
+
+    def test_not_searchable_blocks(self):
+        fid = self.register()
+        self.build_prior_art(fid, result="NOT_SEARCHABLE")
+        r = self.advance(fid, "PRIOR_ART_CHECKED",
+                         f"report at evidence/{fid}/prior-art/audit-2025.md", code=1)
+        self.assertIn("NOT_SEARCHABLE", r.stdout + r.stderr)
+
+    def test_known_conclusion_blocks(self):
+        fid = self.register()
+        self.build_prior_art(fid, conclusion="KNOWN")
+        self.advance(fid, "PRIOR_ART_CHECKED",
+                     f"known per evidence/{fid}/prior-art/audit-2025.md", code=1)
+
+    def test_missing_report_file_blocks(self):
+        fid = self.register()
+        self.build_prior_art(fid, missing_file=True)
+        r = self.advance(fid, "PRIOR_ART_CHECKED",
+                         f"report at evidence/{fid}/prior-art/audit-2025.md", code=1)
+        self.assertIn("audit-2025.md", r.stdout + r.stderr)
+
+    def test_wrong_report_hash_blocks(self):
+        fid = self.register()
+        self.build_prior_art(fid, wrong_hash=True)
+        r = self.advance(fid, "PRIOR_ART_CHECKED",
+                         f"report at evidence/{fid}/prior-art/audit-2025.md", code=1)
+        self.assertIn("hash mismatch", r.stdout + r.stderr)
+
+    def test_no_reports_declared_passes(self):
+        fid = self.register()
+        self.build_prior_art(fid, no_reports=True)
+        r = run(["advance", "--case-root", self.root, "--id", fid,
+                 "--reviewer", "t",
+                 "--reason", "checked docs site and program page, no audits published anywhere",
+                 "--expected-revision", 1])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_no_reports_undeclared_fails(self):
+        fid = self.register()
+        self.build_prior_art(fid, no_reports=True)
+        path = self.evidence(fid, "prior-art.yaml")
+        doc = yaml.safe_load(open(path))
+        doc["no_reports_found"] = False
+        doc["no_reports_note"] = None
+        wyaml(path, doc)
+        r = run(["advance", "--case-root", self.root, "--id", fid,
+                 "--reviewer", "t",
+                 "--reason", "checked docs site and program page, no audits published anywhere",
+                 "--expected-revision", 1])
+        self.assertEqual(r.returncode, 1)
+
+    def test_check_for_unknown_report_rejected(self):
+        fid = self.register()
+        self.build_prior_art(fid, checks=[{
+            "report": "nonexistent report", "searched_for": ["withdraw"],
+            "result": "NO_MATCH", "detail": "n/a", "location": None,
+        }])
+        r = self.advance(fid, "PRIOR_ART_CHECKED",
+                         f"report at evidence/{fid}/prior-art/audit-2025.md", code=1)
+        self.assertIn("unknown report", r.stdout + r.stderr)
+
+    def test_discovery_required(self):
+        fid = self.register()
+        self.build_prior_art(fid)
+        path = self.evidence(fid, "prior-art.yaml")
+        doc = yaml.safe_load(open(path))
+        doc["discovery"] = []
+        wyaml(path, doc)
+        r = self.advance(fid, "PRIOR_ART_CHECKED",
+                         f"report at evidence/{fid}/prior-art/audit-2025.md", code=1)
+        self.assertIn("discovery", r.stdout + r.stderr)
+
+    def test_modified_report_invalidates_gate(self):
+        fid = self.register()
+        self.flow_to(fid, "PRIOR_ART_CHECKED")
+        wfile(self.evidence(fid, "prior-art/audit-2025.md"), "tampered report\n")
+        r = self.advance(fid, "CROSS_CHECKED",
+                         f"see evidence/{fid}/assessment.md", code=1)
+        self.assertIn("INVALID", r.stdout + r.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -529,14 +703,14 @@ class TestScenario4(Base):
 class TestScenario5(Base):
     def test_revision_conflict(self):
         fid = self.register()
-        self.build_cross_check(fid)
+        self.build_prior_art(fid)
         r1 = run(["advance", "--case-root", self.root, "--id", fid,
                   "--reviewer", "s1", "--reason",
-                  f"session1 reviewed evidence/{fid}/assessment.md",
+                  f"session1 checked evidence/{fid}/prior-art/audit-2025.md",
                   "--expected-revision", 1])
         r2 = run(["advance", "--case-root", self.root, "--id", fid,
                   "--reviewer", "s2", "--reason",
-                  f"session2 reviewed evidence/{fid}/assessment.md",
+                  f"session2 checked evidence/{fid}/prior-art/audit-2025.md",
                   "--expected-revision", 1])
         self.assertEqual(r1.returncode, 0, r1.stderr)
         self.assertEqual(r2.returncode, 2)
@@ -552,18 +726,18 @@ class TestScenario5(Base):
 class TestScenario6(Base):
     def test_index_failure_then_recovery(self):
         fid = self.register()
-        self.build_cross_check(fid)
+        self.build_prior_art(fid)
         idx = os.path.join(self.root, "index.md")
         os.remove(idx)
         os.mkdir(idx)  # make the index path unwritable-as-file
         r = run(["advance", "--case-root", self.root, "--id", fid,
                  "--reviewer", "t", "--reason",
-                 f"reviewed evidence/{fid}/assessment.md",
+                 f"checked evidence/{fid}/prior-art/audit-2025.md",
                  "--expected-revision", 1])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("index needs repair", r.stderr)
         fm = read_ledger(self.root, fid)
-        self.assertEqual(fm["stage"], "CROSS_CHECKED")
+        self.assertEqual(fm["stage"], "PRIOR_ART_CHECKED")
         self.assertEqual(fm["revision"], 2)
         self.assertEqual(sum(1 for h in fm["history"] if h["event"] == "advanced"), 1)
         # recovery: rebuild index, no duplicate migration
@@ -573,7 +747,7 @@ class TestScenario6(Base):
         with open(os.path.join(self.root, "index.md"), encoding="utf-8") as f:
             content = f.read()
         self.assertIn(fid, content)
-        self.assertIn("CROSS_CHECKED", content)
+        self.assertIn("PRIOR_ART_CHECKED", content)
         fm2 = read_ledger(self.root, fid)
         self.assertEqual(fm2["revision"], 2)
 
@@ -584,6 +758,7 @@ class TestScenario6(Base):
 class TestScenario7(Base):
     def test_path_traversal_rejected(self):
         fid = self.register()
+        self.flow_to(fid, "PRIOR_ART_CHECKED")
         wfile(os.path.join(self.tmp, "outside.md"), "outside\n")
         self.build_cross_check(fid)
         path = self.evidence(fid, "cross-check.yaml")
@@ -592,7 +767,7 @@ class TestScenario7(Base):
         wyaml(path, doc)
         r = run(["advance", "--case-root", self.root, "--id", fid,
                  "--reviewer", "t", "--reason", "../outside.md reviewed",
-                 "--expected-revision", 1])
+                 "--expected-revision", 2])
         self.assertEqual(r.returncode, 2)
         self.assertIn("escapes", r.stderr)
 
@@ -804,12 +979,13 @@ class TestReopen(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         fm = read_ledger(self.root, fid)
         self.assertEqual(fm["disposition"], "OPEN")
-        self.assertEqual(fm["stage"], "DISCOVERED")
+        self.assertEqual(fm["stage"], "PRIOR_ART_CHECKED")
         events = [h["event"] for h in fm["history"]]
         self.assertIn("closed", events)
         self.assertEqual(events[-1], "reopened")
         statuses = {g["id"]: g["status"] for g in fm["gates"]}
-        self.assertEqual(set(statuses.values()), {"INVALID"})
+        self.assertEqual(statuses["advance:PRIOR_ART_CHECKED"], "PASSED")
+        self.assertEqual(set(statuses.values()) - {"PASSED"}, {"INVALID"})
         r = run(["resume", "--case-root", self.root, "--id", fid])
         self.assertEqual(r.returncode, 0)
 

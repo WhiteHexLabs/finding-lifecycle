@@ -1,4 +1,4 @@
-# Workflow — the seven stages in practice
+# Workflow — the eight stages in practice
 
 Operating manual. State/gate contracts: references/contracts.md. Two red lines
 apply at every stage: **never modify target protocol code** (fix ideas go into
@@ -40,7 +40,59 @@ ledger. Deduplicate against the index and era map first. Pre-screen FAILs print
 a hint to `close --disposition INELIGIBLE --reason ... --evidence ...`; UNKNOWNs
 become blockers — neither is a technical refutation.
 
-## 1. Cross-check (→ CROSS_CHECKED)
+## 1. Prior-art check (→ PRIOR_ART_CHECKED)
+
+Dedup against the project's own published audits BEFORE investing in
+cross-check and fork work. Procedure:
+
+1. Collect audit-report links from the project's **official docs site**
+   (`program.docs_url`) and the **bounty platform program page**
+   (`program.bounty_page_url`). Record both channels with fetch dates.
+2. Download every report into `evidence/<id>/prior-art/` (pdf/md/html) —
+   the CLI never fetches; copies + hashes are your evidence.
+3. Search each report for the root cause: function names, contract names,
+   mechanism keywords. Record a result per report, with page/section.
+4. Write `evidence/<id>/prior-art.yaml`:
+
+```yaml
+discovery:
+  - {kind: docs_site, url: https://docs.example.com/security, fetched_at: "2026-09-14", note: audits section}
+  - {kind: program_page, url: https://immunefi.com/example, fetched_at: "2026-09-14", note: audit links}
+reports:
+  - {title: "2025 audit", url: https://example.com/audit-2025.pdf, auditor: "Firm X",
+     date: "2025-06-01", path: evidence/<id>/prior-art/audit-2025.pdf, sha256: <64hex>}
+checks:
+  - {report: "2025 audit", searched_for: [withdraw, reentrancy, state update],
+     result: NO_MATCH, detail: "no finding shares this root cause", location: null}
+  # MATCH/PARTIAL variant continuing despite the overlap (rules must allow it):
+  # - {report: "...", searched_for: [...], result: PARTIAL, detail: "...", location: "p.12 §3.4",
+  #     still_eligible: {rule_ref: "rules-snapshot.md#known-issues", explanation: "program pays for known-but-unfixed"}}
+no_reports_found: false        # true only when both channels yielded no audit links
+no_reports_note: ...
+conclusion: NEW               # KNOWN means: do not advance, close instead
+```
+
+```bash
+lc check   --id F-…
+lc advance --id F-… --reviewer <you> \
+  --reason "no audit overlap per evidence/F-…/prior-art/audit-2025.pdf" \
+  --expected-revision N
+```
+
+Outcome handling:
+
+- **MATCH / PARTIAL** — default: `close --disposition INELIGIBLE --reason
+  "already reported in <audit>" --evidence <overlap-note.md>` (the overlap note
+  plus the report copy are the evidence; INELIGIBLE keeps the "bug exists, not
+  bounty-eligible" semantics). Continue only when the rules explicitly pay for
+  known-but-unfixed issues, recorded via `still_eligible {rule_ref, explanation}`.
+- **NOT_SEARCHABLE** (e.g. unparseable scan) — unresolved: `record blocker`
+  and resolve it (OCR/manual read) before re-recording.
+- **No published audits** — declare `no_reports_found: true` with a note
+  naming the channels checked; the gate passes and the claim of absence is
+  auditable.
+
+## 2. Cross-check (→ CROSS_CHECKED)
 
 Produce `evidence/<id>/assessment.md` (four pillars + adverse evidence,
 templates/assessment.md) and `evidence/<id>/cross-check.yaml`:
@@ -68,7 +120,7 @@ lc advance --id F-… --reviewer <you> \
   --expected-revision N
 ```
 
-## 2. Fork proof (→ FORK_PROVEN)
+## 3. Fork proof (→ FORK_PROVEN)
 
 Pin the fork and reproduce end-to-end on the real addresses (Foundry mainnet
 fork is the default). Write `evidence/<id>/fork-proof.yaml`:
@@ -94,7 +146,7 @@ RPC down? `record blocker --item "RPC unavailable" --next-step …` and stop —
 never close on infrastructure failure. Name the tests after the assertions so
 the log check is meaningful.
 
-## 3. Triage (→ TRIAGED)
+## 4. Triage (→ TRIAGED)
 
 `evidence/<id>/triage.yaml`:
 
@@ -116,7 +168,7 @@ INELIGIBLE --reason … --evidence …`. Novelty search must be recorded — cla
 "no prior report found", never "provably novel". The snapshot hash must match
 the frozen file.
 
-## 4. Package (→ PACKAGED)
+## 5. Package (→ PACKAGED)
 
 One English report per root cause (templates/report.en.md) into
 `packages/<id>/`. Assemble: report, PoC sources, pinned dependencies
@@ -141,7 +193,7 @@ exceptions must match actual findings (a legit tx hash will trip
 `privkey_hex` — allowlist it with a reason). No floating branches, no
 `curl | sh`, no keys inside the package.
 
-## 5. Self-review (→ SELF_REVIEWED)
+## 6. Self-review (→ SELF_REVIEWED)
 
 Spawn an **independent** session/agent (same model is fine; shared context is
 not). Give it the frozen package + rules — not your draft answers. It reruns
@@ -165,7 +217,7 @@ Changed the report or PoC after review? That is a NEW package: bump it, redo
 package verification and the independent review. Old review records never carry
 over; old packages are never overwritten.
 
-## 6. Submit & defend (→ SUBMITTED, then human-only follow-up)
+## 7. Submit & defend (→ SUBMITTED, then human-only follow-up)
 
 Final checks: re-read the rules; re-verify the channel is private; count
 submissions against the program's per-account limits using your own complete
@@ -205,7 +257,7 @@ supersedes the disposition while history keeps both decisions. "Generated
 material" is never "submitted"; if a send's outcome is unclear, verify on the
 platform before re-sending.
 
-## 7. When things change
+## 8. When things change
 
 New code, new rules, a broken premise, a botched PoC:
 
@@ -221,7 +273,7 @@ frontmatter to "fix" state: manual edits never grant passage, and drift is
 detected as INVALID gates or consistency conflicts (`revision != len(history)`).
 Routine inspection: `lc resume --case-root <dir>` (also rebuilds a broken index).
 
-## 8. Boundaries of this version
+## 9. Boundaries of this version
 
 EVM + Foundry fork only; entry-point agnostic (any audit output that yields a
 claim + targets works). No database, no web UI, no auditor-plugin system, no

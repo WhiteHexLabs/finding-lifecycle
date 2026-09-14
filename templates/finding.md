@@ -37,6 +37,8 @@ program_snapshot:
   sha256: null             # frozen rules snapshot hash at TRIAGED
   checked_at: null
 
+prior_art: null            # set at PRIOR_ART_CHECKED: {checked_at, conclusion, discovery[], reports[]}
+
 evidence: []               # {path, sha256, purpose, produced_by, recorded_at}
 gates: []                  # {id, stage, status, at, reviewer, reason, inputs[]}
 

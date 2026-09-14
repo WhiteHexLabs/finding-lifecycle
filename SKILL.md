@@ -5,7 +5,7 @@ description: Post-discovery lifecycle for smart-contract vulnerability findings 
 
 # finding-lifecycle
 
-Seven-stage lifecycle for verified, submitted vulnerability findings. Markdown
+Eight-stage lifecycle for verified, submitted vulnerability findings (official-audit dedup comes right after registration, before any deep work). Markdown
 ledger per finding is the single source of truth; a Python CLI enforces the
 gates. Load `references/workflow.md` before operating a stage; the state
 machine is specified in `references/contracts.md`.
@@ -38,18 +38,22 @@ commands require the current `--expected-revision` (lost-update protection).
 | # | Stage | Produce | Gate essence |
 |---|-------|---------|--------------|
 | 0 | DISCOVERED | finding-source.yaml + prescreen | traceable source; duplication resolved; pre-screen recorded |
-| 1 | CROSS_CHECKED | cross-check.yaml + assessment.md | explicit affected deployment set (addr + runtime code hash); refutation attempts; damage ≠ profit |
-| 2 | FORK_PROVEN | fork-proof.yaml + PoC + run.log | pinned fork; real addresses; assertions present in the log; PnL split (unknown stays unknown); cheatcodes justified |
-| 3 | TRIAGED | triage.yaml | severity == matrix entry; every eligibility item PASS/NOT_APPLICABLE (FAIL ⇒ close INELIGIBLE); novelty recorded; rules snapshot frozen |
-| 4 | PACKAGED | manifest.yaml + report.en.md + zip | clean-dir run `RESULT: PASS`; hashes; zip complete; secrets scan; pinned deps |
-| 5 | SELF_REVIEWED | self-review.yaml | independent session/agent; bound to final package hash; zero unresolved objections |
-| 6 | SUBMITTED | submission.yaml (record submission → advance) | receipt + PRIVATE channel + package hash + account limits |
+| 1 | PRIOR_ART_CHECKED | prior-art.yaml + report copies | official docs site & program page searched; each audit report hashed locally + checked; MATCH ⇒ INELIGIBLE (or still_eligible with rule_ref); no audits must be declared |
+| 2 | CROSS_CHECKED | cross-check.yaml + assessment.md | explicit affected deployment set (addr + runtime code hash); refutation attempts; damage ≠ profit |
+| 3 | FORK_PROVEN | fork-proof.yaml + PoC + run.log | pinned fork; real addresses; assertions present in the log; PnL split (unknown stays unknown); cheatcodes justified |
+| 4 | TRIAGED | triage.yaml | severity == matrix entry; every eligibility item PASS/NOT_APPLICABLE (FAIL ⇒ close INELIGIBLE); novelty recorded; rules snapshot frozen |
+| 5 | PACKAGED | manifest.yaml + report.en.md + zip | clean-dir run `RESULT: PASS`; hashes; zip complete; secrets scan; pinned deps |
+| 6 | SELF_REVIEWED | self-review.yaml | independent session/agent; bound to final package hash; zero unresolved objections |
+| 7 | SUBMITTED | submission.yaml (record submission → advance) | receipt + PRIVATE channel + package hash + account limits |
 
 Dispositions (independent of stage): `OPEN MERGED INELIGIBLE REFUTED ACCEPTED
 REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
 
 ## Operating rules
 
+- Before cross-checking any finding, dedup it against the project's own audit
+  reports (PRIOR_ART_CHECKED): docs site + program page → download → keyword
+  search → record. Overlap closes as INELIGIBLE unless the rules pay for it.
 - Run `resume` first when picking up any case; it reports blockers, invalid
   gates and rebuilds a broken index. `check` before every `advance`.
 - Modified PoC/report/targets/rules invalidate the affected gates and their
@@ -66,6 +70,6 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
 
 `templates/` (program.yaml, finding, assessment, report.en, self-review,
 appeal, poc/setup_and_run.sh) · `references/` (workflow, contracts) ·
-`scripts/lifecycle.py` · `tests/` (32 behavioral tests: `python3 -m unittest
+`scripts/lifecycle.py` · `tests/` (44 behavioral tests: `python3 -m unittest
 discover -s tests`). Skill install never carries finding data; each target
 program lives in its own case root outside this repo.
