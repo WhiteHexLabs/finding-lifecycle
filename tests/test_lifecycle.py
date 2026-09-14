@@ -560,18 +560,29 @@ class TestScenarioPriorArt(Base):
 # scenario 2: REFUTED needs fork counter-evidence; RPC failure stays a blocker
 
 class TestScenario2(Base):
-    def test_refuted_requires_fork_stage(self):
+    def test_refuted_requires_fork_counter_evidence(self):
         fid = self.register()
+        # no refutation artifacts -> rejected; static doubt stays a blocker
         r = run(["close", "--case-root", self.root, "--id", fid,
-                 "--disposition", "REFUTED", "--refutation-poc", "x",
-                 "--refutation-log", "y", "--boundary", "b" * 40,
+                 "--disposition", "REFUTED", "--boundary", "b" * 40,
                  "--expected-revision", 1])
         self.assertEqual(r.returncode, 2)
-        self.assertIn("fork", r.stderr.lower())
+        # log without the explicit refutation marker -> rejected
+        wfile(self.evidence(fid, "Refuted.t.sol"), "// blocked\n")
+        wfile(self.evidence(fid, "weak.log"),
+              "attack script reverted\nRESULT: PASS\n")
+        r = run(["close", "--case-root", self.root, "--id", fid,
+                 "--disposition", "REFUTED",
+                 "--refutation-poc", f"evidence/{fid}/Refuted.t.sol",
+                 "--refutation-log", f"evidence/{fid}/weak.log",
+                 "--boundary", "b" * 40,
+                 "--expected-revision", 1])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("RESULT: REFUTED", r.stderr)
+        self.assertEqual(read_ledger(self.root, fid)["disposition"], "OPEN")
 
     def test_refuted_needs_artifacts_and_boundary(self):
         fid = self.register()
-        self.flow_to(fid, "FORK_PROVEN")
         r = run(["close", "--case-root", self.root, "--id", fid,
                  "--disposition", "REFUTED", "--boundary", "b" * 40,
                  "--expected-revision", self.revision(fid)])

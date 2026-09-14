@@ -70,6 +70,6 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
 
 `templates/` (program.yaml, finding, assessment, report.en, self-review,
 appeal, poc/setup_and_run.sh) · `references/` (workflow, contracts) ·
-`scripts/lifecycle.py` · `tests/` (44 behavioral tests: `python3 -m unittest
+`scripts/lifecycle.py` · `demo/` (controlled local-chain exercise: success + refutation samples driven end to end via `python3 demo/drive.py`) · `tests/` (45 behavioral tests, demo skips without Foundry: `python3 -m unittest
 discover -s tests`). Skill install never carries finding data; each target
 program lives in its own case root outside this repo.

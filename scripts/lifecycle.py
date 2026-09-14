@@ -1609,10 +1609,11 @@ def cmd_close(a) -> int:
             detail["reason"] = reason
             detail["evidence"] = ev
         elif disp == "REFUTED":
-            if STAGES.index(doc["stage"]) < STAGES.index("FORK_PROVEN"):
-                raise LifecycleError(
-                    "REFUTED requires fork counter-evidence; static doubt without a fork "
-                    "attempt stays a blocker (see plan: 未取证不得结案)")
+            # plan 2.2: REFUTED needs fork counter-evidence plus an explicit
+            # conclusion boundary; a genuine false positive never passes the
+            # FORK_PROVEN attack gate, so no stage precondition is imposed —
+            # the refutation artifacts themselves carry the fork evidence.
+            # Static doubt without a fork attempt stays a blocker.
             poc = as_str(a.refutation_poc, "--refutation-poc")
             log = as_str(a.refutation_log, "--refutation-log")
             boundary = as_str(a.boundary, "--boundary (conclusion boundary)")
@@ -1622,8 +1623,9 @@ def cmd_close(a) -> int:
             if not os.path.isfile(log_p):
                 raise LifecycleError(f"refutation log not found: {log}")
             with open(log_p, encoding="utf-8", errors="ignore") as f:
-                if "RESULT:" not in f.read():
-                    raise LifecycleError("refutation log must contain the 'RESULT:' marker proving the blocking mechanism")
+                if "RESULT: REFUTED" not in f.read():
+                    raise LifecycleError("refutation log must contain the 'RESULT: REFUTED' marker "
+                                         "demonstrating the blocking mechanism")
             poc_p = safe_rel(root, poc, "refutation poc")
             if not os.path.isfile(poc_p):
                 raise LifecycleError(f"refutation PoC not found: {poc}")

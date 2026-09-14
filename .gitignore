@@ -9,5 +9,13 @@ __pycache__/
 # case-root transient artifacts (if a case root lives inside this repo)
 .lifecycle.lock
 
+# foundry / demo build artifacts
+demo/run/
+demo/out/
+demo/cache/
+demo/broadcast/
+demo/lib/
+demo/.gitmodules
+
 # ZCode local session files
 .zcode/
