@@ -1,0 +1,88 @@
+# program.yaml — bounty program configuration for ONE case root.
+# Fill every field. Use null only when the value is genuinely unknown and
+# record why in the matching note. This file is validated by `init` and the
+# rules snapshot hash is re-verified at the TRIAGED gate.
+#
+# The CLI never interprets natural-language exclusions; it only checks
+# structure, references and address matching. Judgement stays with the
+# reviewer, recorded per item in the stage input documents.
+
+program:
+  id: example-program            # required, stable identifier
+  name: Example Protocol Bug Bounty
+  rules_url: https://example.com/bounty-rules
+  fetched_at: "2026-01-01"       # date the rules were fetched
+  valid_until: null              # rules validity window, null = unknown
+  snapshot:                      # frozen rules snapshot (copied into case root)
+    path: rules-snapshot.md      # relative to case root
+    sha256: null                 # filled by `init --rules-snapshot` or sha256sum
+
+scope:
+  chains: [1]
+  targets:
+    - address: "0x1111111111111111111111111111111111111111"
+      role: primary              # primary | proxy | implementation | peripheral
+      note: main pool
+  assets: [USDC, WETH]
+  impacts_allowed: [loss-of-funds, freezing, price-manipulation]
+
+# Severity matrix entries copied verbatim from the rules. The TRIAGED gate
+# requires severity.matrix_entry to reference one of these ids and
+# severity.final to equal its level.
+severity_matrix:
+  - id: S1
+    level: CRITICAL
+    text: "Direct theft of user funds above the critical threshold."
+    basis: "rules section 'Impacts in scope', critical row"
+  - id: S2
+    level: HIGH
+    text: "Direct theft of any user funds below the critical threshold."
+    basis: "rules section 'Impacts in scope', high row"
+
+exclusions:
+  - id: E1
+    category: privileged         # privileged | mev | timing | third_party | other
+    text: "Issues exploitable only by privileged roles are excluded."
+  - id: E2
+    category: mev
+    text: "MEV-adjacent issues within block boundaries are excluded."
+
+# Prior-art sources used for novelty search. Record missing materials
+# explicitly; an incomplete novelty search blocks the TRIAGED gate only when
+# it is not declared.
+novelty_sources:
+  - source: prior-audits
+    location: https://example.com/audits
+    status: available            # available | missing
+  - source: known-issues
+    location: null
+    status: missing
+
+bounty:
+  currency: USD
+  ranges: "critical: 50k-200k; high: 10k-50k"
+  min_accepted_payout: null      # user's own floor; independent of program ranges
+
+submission_limits:
+  accounts: []                   # accounts the limits apply to
+  counting: "per account, per 14 days"
+  window: null
+  max_per_window: null
+  timezone: UTC
+
+delivery:
+  language: en
+  fields: [summary, severity, root cause, PoC, impact]
+  attachments: "zip PoC package via private attachment only"
+  private_channels:
+    - platform private portal
+    - private git repository
+
+kyc:
+  required: UNKNOWN              # REQUIRED | NOT_REQUIRED | UNKNOWN
+
+response:
+  sla: null                      # only from rules or platform receipt; else unknown
+  appeal:
+    method: null
+    deadline_days: null
