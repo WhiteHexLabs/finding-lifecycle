@@ -1,0 +1,18 @@
+# audit-skills.yaml — sequential audit entry configuration for ONE case root.
+# Copy to <case-root>/audit-skills.yaml and fill it in. While this file exists
+# (or an unfinished audits/ batch is present), `ingest` and `register` stay
+# gated until the audit batch completes — there is no fallback entry.
+#
+# Paths are relative to this config file; absolute paths and ~ are allowed.
+# The CLI only validates paths, order and artifacts — it never executes
+# anything configured here (no shell commands, no model selection).
+target_root: /absolute/path/to/protocol   # the protocol source tree to audit
+scope:                                    # non-empty list of files/dirs inside target_root
+  - src
+skills: []                                # empty list = config error once this file exists
+# Fill in, IN EXECUTION ORDER — each entry points directly at a local SKILL.md
+# (no name guessing, no auto-install; duplicates and finding-lifecycle itself
+# are rejected):
+# skills:
+#   - ~/.agents/skills/example-auditor/SKILL.md
+#   - ./skills/another-auditor/SKILL.md

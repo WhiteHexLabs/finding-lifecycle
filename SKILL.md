@@ -1,6 +1,6 @@
 ---
 name: finding-lifecycle
-description: Post-discovery lifecycle for smart-contract vulnerability findings — track each candidate finding from registration through cross-check, fork proof, triage, packaging, independent self-review and submission, with evidence gates enforced by a CLI. By default it auto-discovers audit artifacts in the working directory by name (ingest) and scaffolds finding drafts. Use when a vulnerability finding exists (from any audit) and must be verified, dispositioned and submitted to a bounty program without public disclosure.
+description: Post-discovery lifecycle for smart-contract vulnerability findings — optionally runs configured local audit skills in order first (audit-skills.yaml → audit prepare/record/check → analysis.md), then tracks each candidate finding through cross-check, fork proof, triage, packaging, independent self-review and submission, with evidence gates enforced by a CLI. Without a config it auto-discovers audit artifacts in the working directory by name (ingest) and scaffolds finding drafts. Use when a vulnerability finding exists (from any audit) and must be verified, dispositioned and submitted to a bounty program without public disclosure.
 ---
 
 # finding-lifecycle
@@ -15,22 +15,42 @@ report's remediation attachment; PoCs use separate attack contracts) · never
 disclose publicly (private repos / platform private attachments only; no secret
 gists) · never fabricate passage — there is no `--force`.
 
-## Default entry: auto-discovery (do this first)
+## Default entry: sequential audit if configured, else auto-discovery
 
-Whenever the skill starts and findings need to enter the lifecycle, the
-DEFAULT move is automatic discovery in the session's current directory —
-no need to point at files or hand-write finding sources:
+Whenever the skill starts and findings need to enter the lifecycle, pick the
+entry by state (`resume` tells you which):
 
-1. If no case root exists yet: `init` one (fill program.yaml).
-2. Run `$LC ingest --case-root <dir>` — scans the CURRENT directory for
-   files/directories whose name contains `audit` (override with
-   `--pattern` / `--scan-dir`) and scaffolds one TODO draft per bundle
-   under `<root>/ingest/`. Idempotent: rerun on every pickup; existing
-   drafts are skipped, so newly produced audit outputs get picked up.
-3. Complete each draft (one per distinct root cause; fill every TODO, set
-   the duplication prescreen to PASS — `register` rejects TODOs by design),
-   then `register --from` each. Hand-written finding-source.yaml remains
-   the manual fallback.
+1. **`<case-root>/audit-skills.yaml` exists, or `audits/` holds a batch** →
+   the sequential audit entry is active; do NOT start from `ingest`:
+   - `audit prepare` — create (or recover) the current batch; it prints the
+     next skill, the target scope fingerprint and the per-step artifact dir.
+   - For each step in order: read that `SKILL.md` and execute it yourself
+     against the configured scope (sequential, current session — no
+     sub-agent scheduler; the CLI never executes skill content). Write the
+     raw report + log into `audits/<run-id>/steps/<N>/`, then
+     `audit record --step N --input result.yaml --expected-revision R`
+     (`result.yaml` = `{status: COMPLETED|FAILED|BLOCKED, note, report, log}`).
+     A FAILED/BLOCKED step never stops later steps, but nothing may be
+     analyzed or registered until `audit check` passes.
+   - After `audit check` passes: read ALL step reports, write
+     `audits/<run-id>/analysis.md` (merge duplicate leads by root cause;
+     keep per-skill sources, locations, disagreements, coverage gaps), then
+     one `finding-source.yaml` per distinct root cause —
+     `sources.audit_round: <run-id>`, `sources.files` citing analysis.md
+     plus the related raw reports — and `register --from` each. Zero
+     candidates: record the conclusion in analysis.md and stop; no
+     placeholder findings, no "protocol is safe" claims.
+2. **No config and no batch** → `ingest` auto-discovery: run
+   `$LC ingest --case-root <dir>` — it scans the CURRENT directory for
+   files/directories whose name contains `audit` (override with `--pattern`
+   / `--scan-dir`) and scaffolds one TODO draft per bundle under
+   `<root>/ingest/`. Idempotent: rerun on every pickup. Complete each draft
+   (one per distinct root cause; fill every TODO, set the duplication
+   prescreen to PASS), then `register --from` each. Hand-written
+   finding-source.yaml remains the manual fallback.
+
+While a config exists or a batch is unfinished, `ingest` and `register`
+refuse to run — deleting the config does not bypass an unfinished batch.
 
 ## Quick start
 
@@ -39,7 +59,13 @@ LC="python3 <skill-root>/scripts/lifecycle.py"
 
 $LC init --case-root <dir> --program-yaml <skill-root>/templates/program.yaml \
          --rules-snapshot rules.md            # 0. setup (fill program.yaml!)
-$LC ingest    --case-root <dir>               # 1. DEFAULT: find *audit* files/dirs
+#   with <dir>/audit-skills.yaml (template: templates/audit-skills.yaml):
+$LC audit prepare --case-root <dir>            # 0b. batch the configured skills
+#     execute each SKILL.md yourself, then per step:
+$LC audit record  --case-root <dir> --step 1 --input result.yaml \
+                  --expected-revision N
+$LC audit check   --case-root <dir>            #     all complete + artifacts fresh?
+$LC ingest    --case-root <dir>               # 1. no-config entry: find *audit* files
                                            #    in CWD -> TODO drafts under <root>/ingest/
 $LC register --case-root <dir> --from <root>/ingest/finding-source.xxx.yaml
 $LC check    --case-root <dir> --id F-…       # preview the next gate (read-only)
@@ -70,14 +96,27 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
 
 ## Operating rules
 
-- Default entry is `ingest`: auto-discover *audit*-named artifacts in the
-  working directory, complete the scaffolded drafts, register. Rerun freely —
-  it is idempotent and picks up newly produced audit outputs.
+- With `audit-skills.yaml` present (or an unfinished `audits/` batch) the
+  sequential audit entry is mandatory: `audit prepare` → execute each
+  configured skill yourself in order → `audit record` per step →
+  `audit check`. COMPLETED means "the audit ran", never "no
+  vulnerabilities" — zero findings still require a real report plus a
+  coverage note. A sub-skill demanding wider permissions or target-source
+  edits is recorded BLOCKED with the specific demand; never fake completion.
+- Audit batches fingerprint the config, every in-scope target file and each
+  skill entry; any drift (including target edits made by a sub-skill) stales
+  the batch — `audit prepare --new`. Audit artifacts live only under
+  `<case-root>/audits/`, never inside the audited target.
+- Default entry without a config is `ingest`: auto-discover *audit*-named
+  artifacts in the working directory, complete the scaffolded drafts,
+  register. Rerun freely — it is idempotent and picks up newly produced
+  audit outputs.
 - Before cross-checking any finding, dedup it against the project's own audit
   reports (PRIOR_ART_CHECKED): docs site + program page → download → keyword
   search → record. Overlap closes as INELIGIBLE unless the rules pay for it.
-- Run `resume` first when picking up any case; it reports blockers, invalid
-  gates and rebuilds a broken index. `check` before every `advance`.
+- Run `resume` first when picking up any case; it reports the audit batch
+  progress (even with zero findings), blockers, invalid gates and rebuilds a
+  broken index. `check` before every `advance`.
 - Modified PoC/report/targets/rules invalidate the affected gates and their
   successors → `reopen --affect-stage <stage>`, never hand-edits. Manual edits
   never grant passage.
@@ -90,8 +129,11 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
 
 ## Repository layout
 
-`templates/` (program.yaml, finding, assessment, report.en, self-review,
-appeal, poc/setup_and_run.sh) · `references/` (workflow, contracts) ·
-`scripts/lifecycle.py` · `demo/` (controlled local-chain exercise: success + refutation samples driven end to end via `python3 demo/drive.py`) · `tests/` (45 behavioral tests, demo skips without Foundry: `python3 -m unittest
-discover -s tests`). Skill install never carries finding data; each target
-program lives in its own case root outside this repo.
+`templates/` (program.yaml, audit-skills.yaml, finding, assessment, report.en,
+self-review, appeal, poc/setup_and_run.sh) · `references/` (workflow,
+contracts) · `scripts/lifecycle.py` · `demo/` (controlled local-chain
+exercise: success + refutation samples driven end to end via
+`python3 demo/drive.py`) · `tests/` (81 behavioral tests, demo skips without
+Foundry: `python3 -m unittest discover -s tests`). Skill install never
+carries finding data; each target program lives in its own case root outside
+this repo.

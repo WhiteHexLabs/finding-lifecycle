@@ -1344,8 +1344,48 @@ def reject_todo(label: str, value) -> None:
             "before registering")
 
 
+def validate_audit_sourced(root: str, run: dict, sources: dict, files_list: list) -> None:
+    """Findings registered under a complete audit batch must cite its analysis
+    and at least one raw step report (copies happen via the normal files path)."""
+    rid = run["run_id"]
+    if sources.get("audit_round") != rid:
+        raise LifecycleError(
+            f"finding source: sources.audit_round must be the current audit batch {rid!r} "
+            f"(found {sources.get('audit_round')!r})")
+    analysis_rel = f"audits/{rid}/analysis.md"
+    analysis_real = os.path.realpath(safe_rel(root, analysis_rel, "audit analysis"))
+    if not os.path.isfile(analysis_real):
+        raise LifecycleError(
+            f"finding source: the current audit batch has no analysis file; write "
+            f"{analysis_rel} and reference it from sources.files before registering")
+    report_real = set()
+    for st in run.get("steps") or []:
+        for att in st.get("attempts") or []:
+            spec = att.get("report")
+            if isinstance(spec, dict) and spec.get("path"):
+                report_real.add(os.path.realpath(safe_rel(root, spec["path"], "step report")))
+    referenced = set()
+    for f_ in files_list:
+        f_ = as_dict(f_, "finding source: sources.files")
+        origin = f_.get("path")
+        if isinstance(origin, str) and origin.strip():
+            expanded = os.path.expanduser(origin)
+            if not os.path.isabs(expanded):
+                in_root = os.path.join(root, expanded)
+                expanded = in_root if os.path.isfile(in_root) else expanded
+            referenced.add(os.path.realpath(expanded))
+    if analysis_real not in referenced:
+        raise LifecycleError(
+            f"finding source: sources.files must reference the batch analysis file {analysis_rel}")
+    if not referenced & report_real:
+        raise LifecycleError(
+            "finding source: sources.files must reference at least one raw step report "
+            f"of batch {rid} (audits/{rid}/steps/<N>/attempt-<k>-report…)")
+
+
 def cmd_register(a) -> int:
     root = require_case(a)
+    audit_run = audit_gate(root)
     program = load_program(root)
     inp = load_yaml_file(a.src, "finding source")
     restrict_keys(inp, {"title", "claim", "program_id", "sources", "prescreen", "targets"},
@@ -1362,6 +1402,9 @@ def cmd_register(a) -> int:
     if not (sources.get("auditor") or sources.get("original_finding_id") or sources.get("files")):
         raise LifecycleError("finding source: sources must include auditor, original_finding_id, or files (traceable origin)")
     reject_todo("sources.auditor", sources.get("auditor"))
+    files_list = as_list(sources.get("files") or [], "finding source: sources.files")
+    if audit_run is not None:
+        validate_audit_sourced(root, audit_run, sources, files_list)
 
     prescreen = as_list(inp.get("prescreen") or [], "finding source: prescreen")
     aspects = {}
@@ -1391,9 +1434,13 @@ def cmd_register(a) -> int:
     os.makedirs(os.path.join(ev_dir, "sources"), exist_ok=True)
 
     source_files = []
-    for i, f_ in enumerate(as_list(sources.get("files") or [], "finding source: sources.files")):
+    for i, f_ in enumerate(files_list):
         f_ = as_dict(f_, f"finding source: sources.files[{i}]")
         origin = as_str(f_.get("path"), f"finding source: sources.files[{i}].path (read from anywhere)")
+        expanded = os.path.expanduser(origin)
+        if not os.path.isabs(expanded):
+            in_root = os.path.join(root, expanded)
+            origin = in_root if os.path.isfile(in_root) else expanded
         note = f_.get("note", "")
         base = os.path.basename(origin)
         dest_rel = f"evidence/{fid}/sources/{base}"
@@ -1507,6 +1554,7 @@ targets: []
 
 def cmd_ingest(a) -> int:
     root = require_case(a)
+    audit_gate(root)
     root_real = os.path.realpath(root)
     scan = os.path.realpath(a.scan_dir or os.getcwd())
     if not os.path.isdir(scan):
@@ -1569,6 +1617,500 @@ def cmd_ingest(a) -> int:
     emit({"lines": lines, "scan": scan, "pattern": pattern,
           "bundles": [{"origin": b["origin"], "files": b["files"]} for b in bundles],
           "drafts": drafts}, a.json)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# audit entry: sequential execution of configured local audit skills
+#
+# The CLI manages config, state, artifacts and order — it never executes
+# skill content. The operator (the current session) reads each SKILL.md and
+# follows it; `audit record` freezes the outcome plus report/log copies.
+
+AUDIT_CONFIG_NAME = "audit-skills.yaml"
+AUDIT_RESULT_STATUSES = ["COMPLETED", "FAILED", "BLOCKED"]
+SELF_SKILL_MD = os.path.realpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, "SKILL.md"))
+
+
+def resolve_external_path(base_dir: str, value, what: str) -> str:
+    """Resolve a config path: relative to base_dir, absolute or ~/ allowed."""
+    if not isinstance(value, str) or not value.strip():
+        raise LifecycleError(f"{what}: expected a non-empty path")
+    v = os.path.expanduser(value)
+    if not os.path.isabs(v):
+        v = os.path.join(base_dir, v)
+    return os.path.realpath(v)
+
+
+def load_audit_config(root: str):
+    """Load audit-skills.yaml; returns (normalized config or None, path)."""
+    path = os.path.join(root, AUDIT_CONFIG_NAME)
+    if not os.path.isfile(path):
+        return None, path
+    cfg = load_yaml_file(path, AUDIT_CONFIG_NAME)
+    restrict_keys(cfg, {"target_root", "scope", "skills"}, AUDIT_CONFIG_NAME)
+    target_root = resolve_external_path(root, cfg.get("target_root"),
+                                        f"{AUDIT_CONFIG_NAME}: target_root")
+    if not os.path.isdir(target_root):
+        raise LifecycleError(
+            f"{AUDIT_CONFIG_NAME}: target_root is not an existing directory: {target_root}")
+    scope = as_list(cfg.get("scope"), f"{AUDIT_CONFIG_NAME}: scope")
+    if not scope:
+        raise LifecycleError(
+            f"{AUDIT_CONFIG_NAME}: scope must be a non-empty list of files/directories "
+            "inside target_root")
+    scope_paths = []
+    for i, entry in enumerate(scope):
+        p = resolve_external_path(target_root, entry, f"{AUDIT_CONFIG_NAME}: scope[{i}]")
+        if not (p == target_root or p.startswith(target_root + os.sep)):
+            raise LifecycleError(
+                f"{AUDIT_CONFIG_NAME}: scope[{i}] escapes target_root: {entry!r}")
+        if not os.path.exists(p):
+            raise LifecycleError(
+                f"{AUDIT_CONFIG_NAME}: scope[{i}] not found under target_root: {entry!r}")
+        scope_paths.append(p)
+    skills = as_list(cfg.get("skills"), f"{AUDIT_CONFIG_NAME}: skills")
+    if not skills:
+        raise LifecycleError(
+            f"{AUDIT_CONFIG_NAME}: skills list is empty — configure at least one local "
+            "SKILL.md; an empty configured audit must not fall back to report import")
+    skill_paths = []
+    for i, s in enumerate(skills):
+        p = resolve_external_path(root, s, f"{AUDIT_CONFIG_NAME}: skills[{i}]")
+        if p in skill_paths:
+            raise LifecycleError(f"{AUDIT_CONFIG_NAME}: duplicate skill path: {s!r}")
+        if p == SELF_SKILL_MD:
+            raise LifecycleError(
+                f"{AUDIT_CONFIG_NAME}: skills must not include finding-lifecycle itself")
+        skill_paths.append(p)
+    return {"path": os.path.realpath(path), "target_root": target_root,
+            "scope": scope_paths, "skills": skill_paths}, path
+
+
+def audits_root(root: str) -> str:
+    return os.path.join(root, "audits")
+
+
+def list_audit_runs(root: str) -> list:
+    d = audits_root(root)
+    if not os.path.isdir(d):
+        return []
+    return sorted(n for n in os.listdir(d)
+                  if n.startswith("run-") and os.path.isdir(os.path.join(d, n)))
+
+
+def load_audit_run(root: str):
+    """Load the newest batch's run.yaml; None when no batch exists."""
+    runs = list_audit_runs(root)
+    if not runs:
+        return None
+    run_id = runs[-1]
+    rel = f"audits/{run_id}/run.yaml"
+    data = load_yaml_file(os.path.join(audits_root(root), run_id, "run.yaml"), rel)
+    restrict_keys(data, {"run_id", "created_at", "revision", "config", "target",
+                         "steps", "history"}, rel)
+    if data.get("run_id") != run_id:
+        raise LifecycleError(f"{rel}: run_id {data.get('run_id')!r} does not match directory")
+    rev = data.get("revision")
+    if not isinstance(rev, int) or rev < 1:
+        raise LifecycleError(f"{rel}: revision must be a positive integer")
+    if rev != len(data.get("history") or []):
+        raise LifecycleError(
+            f"{rel}: consistency conflict: revision {rev} != {len(data.get('history') or [])} "
+            "history events; run `resume` and repair before any further mutation")
+    steps = as_list(data.get("steps"), f"{rel}: steps")
+    for i, st in enumerate(steps):
+        st = as_dict(st, f"{rel}: steps[{i}]")
+        as_str(st.get("skill"), f"{rel}: steps[{i}].skill")
+        check_enum(st.get("status"), ["PENDING", "COMPLETED", "FAILED", "BLOCKED"],
+                   f"{rel}: steps[{i}].status")
+        st.setdefault("attempts", [])
+    return data
+
+
+def audit_scope_files(target_root, scope, root) -> list:
+    """Manifest of files covered by the audit; batch artifacts never count."""
+    exclude = os.path.realpath(audits_root(root))
+    files = []
+
+    def excluded(p):
+        rp = os.path.realpath(p)
+        return rp == exclude or rp.startswith(exclude + os.sep)
+
+    for entry in scope or []:
+        if os.path.isdir(entry):
+            for dirpath, dirnames, filenames in os.walk(entry):
+                dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+                for f in sorted(filenames):
+                    if f.startswith("."):
+                        continue
+                    p = os.path.realpath(os.path.join(dirpath, f))
+                    if not excluded(p):
+                        files.append(p)
+        elif os.path.exists(entry) and not excluded(entry):
+            files.append(entry)
+    return sorted(set(files))
+
+
+def audit_freshness_issues(root: str, run: dict) -> list:
+    """Drift between the batch fingerprint and the current world."""
+    issues = []
+    cfg = run.get("config") or {}
+    cfg_path = cfg.get("path")
+    if isinstance(cfg_path, str) and os.path.isfile(cfg_path):
+        if sha256_file(cfg_path) != cfg.get("sha256"):
+            issues.append(f"audit config changed: {AUDIT_CONFIG_NAME} "
+                          "(start a new batch with `audit prepare --new`)")
+    target = run.get("target") or {}
+    old = {f.get("path"): f.get("sha256") for f in target.get("files") or []}
+    new = {p: sha256_file(p)
+           for p in audit_scope_files(target.get("root"), target.get("scope"), root)}
+    drifted = sorted(set(old) ^ set(new)) + sorted(
+        p for p in set(old) & set(new) if old[p] != new[p])
+    for p in drifted:
+        issues.append(f"audited target scope drifted: {p}")
+    if drifted:
+        issues.append("target content/file set changed since prepare; "
+                      "start a new batch with `audit prepare --new`")
+    for st in run.get("steps") or []:
+        p = st.get("skill")
+        expected = st.get("skill_sha256")
+        if not os.path.isfile(p):
+            if expected:
+                issues.append(f"skill entry missing: {p} "
+                              "(start a new batch with `audit prepare --new`)")
+        elif expected is None:
+            issues.append(f"skill entry now present but never fingerprinted: {p}; "
+                          "start a new batch with `audit prepare --new`")
+        elif sha256_file(p) != expected:
+            issues.append(f"skill entry changed: {p} "
+                          "(start a new batch with `audit prepare --new`)")
+    return issues
+
+
+def audit_artifact_issues(root: str, run: dict) -> list:
+    """Frozen per-step artifacts must exist and still hash correctly."""
+    issues = []
+    for st in run.get("steps") or []:
+        n = st.get("step")
+        if st.get("status") != "COMPLETED":
+            issues.append(f"step {n} is {st.get('status')}")
+            continue
+        attempts = st.get("attempts") or []
+        if not attempts:
+            issues.append(f"step {n}: COMPLETED without a recorded attempt")
+            continue
+        att = attempts[-1]
+        for key in ("report", "log"):
+            spec = att.get(key)
+            if not isinstance(spec, dict) or not spec.get("path"):
+                issues.append(f"step {n}: completed attempt has no {key} recorded")
+                continue
+            p = safe_rel(root, spec["path"], f"step {n} {key}")
+            if not os.path.isfile(p):
+                issues.append(f"step {n}: {key} missing: {spec['path']}")
+            elif sha256_file(p) != spec.get("sha256"):
+                issues.append(f"step {n}: {key} hash mismatch: {spec['path']}")
+    return issues
+
+
+def audit_progress(run: dict):
+    steps = run.get("steps") or []
+    done = [st for st in steps if st.get("status") == "COMPLETED"]
+    nxt = next((st for st in steps if st.get("status") != "COMPLETED"), None)
+    return len(done), len(steps), nxt
+
+
+def audit_steps_payload(run: dict) -> list:
+    return [{"step": st.get("step"), "skill": st.get("skill"),
+             "status": st.get("status"), "attempts": len(st.get("attempts") or [])}
+            for st in run.get("steps") or []]
+
+
+def audit_state_issues(root: str):
+    """Entry gate state: 'none' | 'incomplete' | 'complete' (+ run, issues)."""
+    has_cfg = os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME))
+    try:
+        run = load_audit_run(root)
+    except LifecycleError as exc:
+        return "incomplete", None, [f"audit batch unreadable: {exc}"]
+    try:
+        load_audit_config(root)
+    except LifecycleError as exc:
+        return "incomplete", run, [f"audit config invalid: {exc}"]
+    if run is None:
+        if not has_cfg:
+            return "none", None, []
+        return "incomplete", None, [
+            f"{AUDIT_CONFIG_NAME} exists but no batch was prepared; run `audit prepare`"]
+    issues = audit_freshness_issues(root, run) + audit_artifact_issues(root, run)
+    if issues:
+        return "incomplete", run, issues
+    return "complete", run, []
+
+
+def audit_gate(root: str):
+    """Ingest/register must wait for a fresh, complete audit batch."""
+    status, run, issues = audit_state_issues(root)
+    if status == "incomplete":
+        raise GateFailure("audit:entry", issues, [
+            "finish the audit batch (FAILED/BLOCKED steps may be rerun in original order)",
+            "if the config, target or skill entries changed: `audit prepare --new`",
+        ])
+    return run
+
+
+def audit_run_lines(root: str, run: dict) -> list:
+    done, total, nxt = audit_progress(run)
+    lines = [f"audit batch {run['run_id']}: {done}/{total} step(s) completed"]
+    for st in run.get("steps") or []:
+        if st.get("status") in ("FAILED", "BLOCKED"):
+            attempts = st.get("attempts") or []
+            note = attempts[-1].get("note", "") if attempts else ""
+            lines.append(f"  step {st.get('step')} {st.get('status')}: {note}")
+    for issue in audit_freshness_issues(root, run):
+        lines.append(f"  [stale] {issue}")
+    if nxt is not None:
+        lines.append(f"  next: execute step {nxt['step']} per {nxt['skill']} "
+                     f"(artifacts: audits/{run['run_id']}/steps/{nxt['step']}/)")
+    else:
+        lines.append("  next: `audit check` -> write audits/…/analysis.md -> "
+                     "one finding-source per root cause -> `register --from`")
+    return lines
+
+
+def audit_resume_lines(root: str) -> list:
+    has_cfg = os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME))
+    try:
+        run = load_audit_run(root)
+    except LifecycleError as exc:
+        return [f"audit batch: UNREADABLE — {exc}"]
+    if run is None and not has_cfg:
+        return []
+    if run is None:
+        return [f"{AUDIT_CONFIG_NAME} present but no batch prepared",
+                "  next: `audit prepare`"]
+    return audit_run_lines(root, run)
+
+
+def cmd_audit_prepare(a) -> int:
+    root = require_case(a)
+    cfg, _cfg_path = load_audit_config(root)
+    with CaseLock(root):
+        current = load_audit_run(root)
+        if current is not None and not a.new:
+            issues = audit_freshness_issues(root, current)
+            if issues:
+                raise GateFailure("audit:prepare", issues, [
+                    "this batch no longer matches the config/target/skills",
+                    "start a new batch: `audit prepare --new` (old batches stay on disk)",
+                ])
+            done, total, nxt = audit_progress(current)
+            run_dir = os.path.join(audits_root(root), current["run_id"])
+            lines = [f"recovered audit batch {current['run_id']} ({done}/{total} completed)"]
+            if nxt is not None:
+                lines.append(f"  next step {nxt['step']}: {nxt['skill']} ({nxt['status']})")
+                lines.append(f"  artifacts: {os.path.join(run_dir, 'steps', str(nxt['step']))}")
+                lines.append("  after executing that skill: `audit record --step "
+                             f"{nxt['step']} --input result.yaml --expected-revision "
+                             f"{current['revision']}`")
+            else:
+                lines.append("  all steps completed; run `audit check`, write analysis.md, "
+                             "then register one finding-source per root cause")
+            emit({"lines": lines, "run_id": current["run_id"], "recovered": True,
+                  "revision": current["revision"],
+                  "steps": audit_steps_payload(current)}, a.json)
+            return EXIT_OK
+
+        if cfg is None:
+            raise LifecycleError(
+                f"no {AUDIT_CONFIG_NAME} found in the case root; the sequential audit "
+                f"entry needs one (template: templates/{AUDIT_CONFIG_NAME})")
+        run_id = None
+        for _ in range(5):
+            candidate = ("run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+                         + "-" + uuid.uuid4().hex[:4])
+            if not os.path.exists(os.path.join(audits_root(root), candidate)):
+                run_id = candidate
+                break
+        if run_id is None:  # pragma: no cover — timestamp+uuid collision storm
+            raise LifecycleError("could not allocate a unique audit run id; retry")
+        os.makedirs(os.path.join(audits_root(root), run_id, "steps"), exist_ok=True)
+        files = [{"path": p, "sha256": sha256_file(p)}
+                 for p in audit_scope_files(cfg["target_root"], cfg["scope"], root)]
+        steps = []
+        for i, sp in enumerate(cfg["skills"], start=1):
+            os.makedirs(os.path.join(audits_root(root), run_id, "steps", str(i)),
+                        exist_ok=True)
+            st = {"step": i, "skill": sp, "skill_sha256": None,
+                  "status": "PENDING", "attempts": []}
+            if os.path.isfile(sp):
+                st["skill_sha256"] = sha256_file(sp)
+            else:
+                st["status"] = "BLOCKED"
+                st["attempts"].append({
+                    "at": now_iso(), "status": "BLOCKED",
+                    "note": f"skill entry file not found: {sp}",
+                    "report": None, "log": None})
+            steps.append(st)
+        run = {
+            "run_id": run_id,
+            "created_at": now_iso(),
+            "revision": 1,
+            "config": {"path": cfg["path"], "sha256": sha256_file(cfg["path"]),
+                       "target_root": cfg["target_root"], "scope": cfg["scope"],
+                       "skills": cfg["skills"]},
+            "target": {"root": cfg["target_root"], "scope": cfg["scope"], "files": files},
+            "steps": steps,
+            "history": [{"at": now_iso(), "event": "created",
+                         "detail": {"skills": len(steps), "scope_files": len(files)}}],
+        }
+        atomic_write(os.path.join(audits_root(root), run_id, "run.yaml"),
+                     yaml.safe_dump(run, sort_keys=False, allow_unicode=True, width=120))
+    blocked = [st["step"] for st in steps if st["status"] == "BLOCKED"]
+    lines = [f"audit batch {run_id} created: {len(steps)} skill(s), "
+             f"{len(files)} scope file(s) hashed"]
+    for st in steps:
+        lines.append(f"  step {st['step']}: {st['status']} — {st['skill']}")
+    lines.append(f"  artifacts: {os.path.join(audits_root(root), run_id, 'steps', '<N>')}")
+    lines.append("next: read step 1's SKILL.md, execute it against the scope, write "
+                 "report+log into its artifact dir, then `audit record` the result")
+    if blocked:
+        lines.append(f"NOTE: step(s) {blocked} are BLOCKED (missing SKILL.md); the batch "
+                     "cannot pass `audit check` until they are fixed via a new batch")
+    emit({"lines": lines, "run_id": run_id, "steps": audit_steps_payload(run),
+          "scope_files": [f["path"] for f in files]}, a.json)
+    return EXIT_OK
+
+
+def cmd_audit_record(a) -> int:
+    root = require_case(a)
+    with CaseLock(root):
+        run = load_audit_run(root)
+        if run is None:
+            raise LifecycleError("no audit batch under audits/; run `audit prepare` first")
+        if not isinstance(a.expected_revision, int) or a.expected_revision != run["revision"]:
+            raise LifecycleError(
+                f"revision conflict: expected {a.expected_revision}, run.yaml is at "
+                f"{run['revision']}; re-read the batch and retry with the current revision")
+        issues = audit_freshness_issues(root, run)
+        if issues:
+            raise GateFailure("audit:record", issues, [
+                "this batch no longer matches the config/target/skills",
+                "start a new batch: `audit prepare --new`",
+            ])
+        steps = as_list(run["steps"], "run.yaml: steps")
+        if not (1 <= a.step <= len(steps)):
+            raise LifecycleError(f"--step out of range (1..{len(steps)})")
+        st = steps[a.step - 1]
+        if st["status"] == "COMPLETED":
+            raise LifecycleError(
+                f"step {a.step} is already COMPLETED; completed steps are not re-executed "
+                "(reruns happen in a new batch)")
+        prior = steps[:a.step - 1]
+        if not st.get("attempts"):
+            skipped = [p["step"] for p in prior if not p.get("attempts")]
+            if skipped:
+                raise LifecycleError(
+                    f"cannot record step {a.step}: earlier step(s) {skipped} have no "
+                    "execution result yet; record them first (out-of-order recording "
+                    "is rejected)")
+        else:
+            unresolved = [p["step"] for p in prior if p.get("status") != "COMPLETED"]
+            if unresolved:
+                raise LifecycleError(
+                    f"cannot retry step {a.step} yet: earlier step(s) {unresolved} are not "
+                    "COMPLETED; rerun failed/blocked items in their original order")
+
+        inp = load_yaml_file(a.input, "audit result")
+        restrict_keys(inp, {"status", "note", "report", "log"}, "audit result")
+        status = check_enum(inp.get("status"), AUDIT_RESULT_STATUSES, "audit result: status")
+        note = as_str(inp.get("note"), "audit result: note")
+        if len(note.strip()) < 20:
+            raise LifecycleError(
+                "audit result: note must be substantive (>= 20 characters): what ran, "
+                "what was covered, and why it ended in this status")
+        if status == "COMPLETED" and not st.get("skill_sha256"):
+            raise LifecycleError(
+                f"step {a.step}: cannot record COMPLETED — its skill entry was not "
+                "readable at prepare time; fix the skill path and start a new batch")
+
+        attempt = {"at": now_iso(), "status": status, "note": note,
+                   "report": None, "log": None}
+        step_dir_rel = f"audits/{run['run_id']}/steps/{a.step}"
+        step_dir = safe_rel(root, step_dir_rel, "step artifact dir")
+        os.makedirs(step_dir, exist_ok=True)
+        seq = len(st.get("attempts") or []) + 1
+        for key in ("report", "log"):
+            src = inp.get(key)
+            if src is None:
+                if status == "COMPLETED":
+                    raise LifecycleError(
+                        f"audit result: {key} is required for COMPLETED (zero findings "
+                        "still need the real report and coverage note)")
+                continue
+            if not isinstance(src, str) or not src.strip():
+                raise LifecycleError(f"audit result: {key} must be a path")
+            expanded = os.path.expanduser(src)
+            src = os.path.realpath(expanded if os.path.isabs(expanded)
+                                   else os.path.join(root, expanded))
+            if not os.path.isfile(src):
+                raise LifecycleError(f"audit result: {key} file not found: {src}")
+            ext = os.path.splitext(src)[1] or ".md"
+            dest_rel = f"{step_dir_rel}/attempt-{seq}-{key}{ext}"
+            dest = safe_rel(root, dest_rel, "step artifact")
+            shutil.copyfile(src, dest)
+            attempt[key] = {"path": dest_rel, "sha256": sha256_file(dest)}
+
+        st["attempts"].append(attempt)
+        st["status"] = status
+        run["history"].append({"at": now_iso(), "event": "recorded",
+                               "detail": {"step": a.step, "status": status, "attempt": seq}})
+        run["revision"] += 1
+        atomic_write(os.path.join(audits_root(root), run["run_id"], "run.yaml"),
+                     yaml.safe_dump(run, sort_keys=False, allow_unicode=True, width=120))
+
+    done, total, nxt = audit_progress(run)
+    lines = [f"recorded step {a.step} as {status} (attempt {seq}; revision {run['revision']}); "
+             f"batch {run['run_id']}: {done}/{total} completed"]
+    if nxt is not None:
+        lines.append(f"next: step {nxt['step']} — {nxt['skill']}")
+    elif done == total:
+        lines.append("all steps completed; next: `audit check`")
+    else:
+        lines.append("every step has a first result; FAILED/BLOCKED steps must be "
+                     "resolved (original order) before `audit check` passes")
+    emit({"lines": lines, "run_id": run["run_id"], "step": a.step, "status": status,
+          "revision": run["revision"], "attempt": seq}, a.json)
+    return EXIT_OK
+
+
+def cmd_audit_check(a) -> int:
+    root = require_case(a)
+    run = load_audit_run(root)
+    if run is None:
+        if os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME)):
+            raise GateFailure("audit:check",
+                              [f"{AUDIT_CONFIG_NAME} exists but no batch was prepared"],
+                              ["run: audit prepare"])
+        raise GateFailure("audit:check",
+                          ["no audit batch and no audit config in this case root"],
+                          [f"configure {AUDIT_CONFIG_NAME} for the sequential audit entry"])
+    issues = audit_freshness_issues(root, run) + audit_artifact_issues(root, run)
+    if issues:
+        raise GateFailure("audit:check", issues, [
+            "finish every step (FAILED/BLOCKED items may be rerun in original order "
+            "after the first pass)",
+            "if the config, target or skill entries changed: `audit prepare --new`",
+        ])
+    done, total, _ = audit_progress(run)
+    emit({"lines": [f"audit batch {run['run_id']}: {done}/{total} steps completed — PASS",
+                    f"next: read all step reports, write audits/{run['run_id']}/analysis.md "
+                    "(merge duplicates by root cause), then register one finding-source "
+                    "per distinct root cause"],
+          "run_id": run["run_id"], "status": "PASS",
+          "steps": audit_steps_payload(run)}, a.json)
     return EXIT_OK
 
 
@@ -1874,13 +2416,16 @@ def pending_summary(doc: dict, program: dict):
 def cmd_resume(a) -> int:
     root = require_case(a)
     program = load_program(root)
+    audit_lines = audit_resume_lines(root)
     fids = [a.id] if a.id else list_findings(root)
     if not fids:
-        emit({"lines": ["no findings registered"]}, a.json)
+        emit({"lines": audit_lines + ["no findings registered"], "audit": audit_lines}, a.json)
         return EXIT_OK
     structural = 0
-    report = {"findings": []}
-    lines = []
+    report = {"audit": audit_lines, "findings": []}
+    lines = list(audit_lines)
+    if audit_lines:
+        lines.append("")
     for fid in fids:
         try:
             doc, _ = load_ledger(root, fid)
@@ -2148,6 +2693,33 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_ingest)
 
+    sp = sub.add_parser("audit",
+                        help="sequential audit-skill batches (config-driven entry)")
+    asp = sp.add_subparsers(dest="audit_command", required=True, metavar="audit_command")
+
+    q = asp.add_parser("prepare",
+                       help="create or recover the current audit batch")
+    q.add_argument("--case-root", required=True)
+    q.add_argument("--new", action="store_true",
+                   help="start a new batch, keeping old batches on disk")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_audit_prepare)
+
+    q = asp.add_parser("record", help="record one skill execution result")
+    q.add_argument("--case-root", required=True)
+    q.add_argument("--step", type=int, required=True)
+    q.add_argument("--input", required=True,
+                   help="result.yaml: {status: COMPLETED|FAILED|BLOCKED, note, report, log}")
+    q.add_argument("--expected-revision", type=int, required=True)
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_audit_record)
+
+    q = asp.add_parser("check",
+                       help="verify the current audit batch is complete and fresh")
+    q.add_argument("--case-root", required=True)
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_audit_check)
+
     sp = sub.add_parser("register", help="register a finding from an original source")
     sp.add_argument("--case-root", required=True)
     sp.add_argument("--from", dest="src", required=True, help="finding-source.yaml")
@@ -2267,7 +2839,10 @@ def main(argv=None) -> int:
         if not getattr(args, "json", False):
             print(f"gate {gf.gate_id}: FAIL", file=sys.stderr)
             for issue in gf.issues:
-                print(f"  [{issue['category']}] {issue['detail']}", file=sys.stderr)
+                if isinstance(issue, dict):
+                    print(f"  [{issue['category']}] {issue['detail']}", file=sys.stderr)
+                else:
+                    print(f"  - {issue}", file=sys.stderr)
             if gf.next_steps:
                 print("next steps:", file=sys.stderr)
                 for s in gf.next_steps:

@@ -61,6 +61,69 @@ resolve the duplication prescreen to PASS, then `register --from` each.
 the claim and the dedup judgment stay with you. Rerunning `ingest` is
 idempotent (existing drafts are skipped).
 
+## 0b. Sequential audit entry (with audit-skills.yaml)
+
+When `<case-root>/audit-skills.yaml` exists (template:
+`templates/audit-skills.yaml`), discovery starts from a configured, ordered
+audit instead of name-based scanning — and `ingest`/`register` stay gated
+until that audit completes. The config names the target tree, the scope
+inside it and the local SKILL.md files to execute:
+
+```yaml
+target_root: /absolute/path/to/protocol   # or relative to this file; ~ allowed
+scope: [src]                              # non-empty, inside target_root
+skills:                                   # non-empty, IN EXECUTION ORDER
+  - ~/.agents/skills/example-auditor/SKILL.md
+```
+
+Nothing is guessed, installed or executed by the CLI: you read each SKILL.md
+and follow it in the current session, sequentially (no sub-agent scheduler).
+Loop per step:
+
+```bash
+lc audit prepare --case-root <dir> [--new]   # create/recover batch; prints next skill + artifact dir
+#   read audits/<run-id>/steps/<N>'s SKILL.md; run that audit against the scope;
+#   write the raw report + log into audits/<run-id>/steps/<N>/
+lc audit record --case-root <dir> --step N --input result.yaml --expected-revision R
+lc audit check  --case-root <dir>            # every step COMPLETED + artifacts fresh?
+```
+
+`result.yaml` per step (`report`/`log` paths resolve relative to the case
+root; absolute allowed; both are required for COMPLETED and get frozen as
+copies `steps/<N>/attempt-<k>-report|log…`, so retries never overwrite
+history):
+
+```yaml
+status: COMPLETED | FAILED | BLOCKED
+note: ...        # substantive: what ran, what was covered, why this status
+report: <path>   # zero findings still need the real report + coverage note
+log: <path>
+```
+
+Enforced rules: steps record strictly in order (no skipping unexecuted
+items); after the first pass only FAILED/BLOCKED steps may be rerun — in
+their original order; COMPLETED steps are terminal within a batch. The batch
+fingerprints the config, every in-scope target file and each SKILL.md: any
+drift (including target edits made by a sub-skill) stales the batch →
+`audit prepare --new`. A missing SKILL.md blocks its step at prepare while
+other steps still run. A sub-skill demanding wider permissions or
+target-source edits is recorded BLOCKED with the specific demand — never
+silently "completed". Audit artifacts are written only under the case root,
+never into the audited target.
+
+After `audit check` passes, aggregate BEFORE registering: read ALL step
+reports and write `audits/<run-id>/analysis.md` — merge duplicate leads by
+root cause, keeping each audit's source, locations, disagreements,
+preconditions and coverage gaps. Zero candidates: record that conclusion in
+analysis.md and stop (no placeholder findings, no "protocol is safe"
+claims). Otherwise write one finding-source.yaml per distinct root cause
+with `sources.audit_round: <run-id>` and `sources.files` citing analysis.md
+plus the related raw step reports (they are copied into evidence at
+register time), then `register --from` each and continue at §1. Do NOT use
+`ingest` to collect batch artifacts — read the batch-registered files
+directly. `resume` reports batch progress, blocked steps and the next move
+even when no findings exist yet.
+
 ## 1. Prior-art check (→ PRIOR_ART_CHECKED)
 
 Dedup against the project's own published audits BEFORE investing in
@@ -297,6 +360,9 @@ Routine inspection: `lc resume --case-root <dir>` (also rebuilds a broken index)
 ## 9. Boundaries of this version
 
 EVM + Foundry fork only; entry-point agnostic (any audit output that yields a
-claim + targets works). No database, no web UI, no auditor-plugin system, no
-auto-submission service, no model routing, no secret gists — delivery goes
+claim + targets works). The sequential audit entry executes configured skills
+one by one in the current session — no sub-agent scheduler, no model routing,
+no skill auto-installation; the CLI validates config, order, state and
+artifacts only. No database, no web UI, no auditor-plugin system, no
+auto-submission service, no secret gists — delivery goes
 through private repositories and platform-private attachments only.
