@@ -2,18 +2,21 @@
 
 Normative reference for `scripts/lifecycle.py`. Files are authoritative; the
 CLI only performs validated, locked, atomic, revision-checked transitions.
+This skill never executes audit skills (see references/handoff-contract.md
+for the audit-orchestrator boundary).
 
 ## 1. Case root layout
 
 ```text
 <case-root>/
 ├── program.yaml          # program configuration (validated at init / load)
-├── audit-skills.yaml     # optional: sequential audit entry config (see §8)
+├── audit-skills.yaml     # legacy: no longer executed here; warning only
 ├── rules-snapshot.md     # frozen rules snapshot (hash recorded in program.yaml)
 ├── findings/F-<uuid>.md  # one ledger per finding (single source of truth)
 ├── evidence/F-<uuid>/    # source copies, stage input docs, logs, receipts
 ├── packages/F-<uuid>/    # frozen report + PoC package (+ manifest, zip)
-├── audits/run-…/         # audit batches: run.yaml + steps/<N>/ + analysis.md
+├── imports/audit/<run-id>/  # immutable imported audit evidence (see §8)
+├── ingest/               # scaffolded finding-source drafts (entries 0A/0B)
 ├── index.md              # derived; rebuildable; never a source of truth
 └── .lifecycle.lock       # transient write lock
 ```
@@ -107,16 +110,13 @@ commands take `--expected-revision` (compare-and-swap against the ledger).
 
 ```text
 init       --case-root D [--program-yaml P] [--program-id X] [--rules-snapshot F]
+import-audit --case-root D --handoff manifest.yaml [--json]
+           verify a finalized audit-orchestrator handoff (schema, hashes,
+           path confinement), copy immutable evidence under imports/audit/,
+           scaffold one TODO draft per candidate; never registers anything
 ingest     --case-root D [--scan-dir DIR] [--pattern audit] [--json]
            name-based discovery of audit artifacts -> TODO drafts under <root>/ingest/;
-           no content parsing; `register` rejects unresolved TODO fields;
-           gated while an audit config/batch is active (see §8)
-audit prepare --case-root D [--new] [--json]
-           create or recover the current sequential-audit batch
-audit record  --case-root D --step N --input result.yaml --expected-revision N [--json]
-           record one skill-execution result (COMPLETED|FAILED|BLOCKED + note + artifacts)
-audit check   --case-root D [--json]
-           PASS only when every step is COMPLETED and all frozen artifacts hash-match
+           no content parsing; `register` rejects unresolved TODO fields
 register   --case-root D --from finding-source.yaml [--json]
 check      --case-root D --id F [--stage S] [--input P] [--json]
 advance    --case-root D --id F --reviewer R --reason T [--input P] --expected-revision N
@@ -176,46 +176,46 @@ exclusion interpretation stays with the reviewer, recorded per eligibility item.
 - No auto-submission, auto-appeal or background polling exists in this version;
   sending is human-only through private channels (workflow.md §8).
 
-## 8. Audit batch contract
+## 8. Audit import contract (`import-audit`)
 
-`audit-skills.yaml` (template in `templates/`) names `target_root` (an
-existing directory; paths resolve relative to the config file — absolute and
-`~` allowed), a non-empty `scope` of existing files/dirs that must stay inside
-`target_root`, and a non-empty `skills` list of local SKILL.md paths in
-execution order. Duplicate skill paths, finding-lifecycle itself, unknown
-keys, empty `scope` and empty `skills` are config errors (exit 2) — an empty
-configured audit never falls back to the report-import entry. The CLI never
-executes skill content: it manages config, state, artifacts and order only;
-the current session reads each SKILL.md and follows it, sequentially.
+This skill never executes audit skills. A legacy `audit-skills.yaml` found
+in the case root only produces a warning on entry commands — nothing is
+gated, blocked or executed because of it; audit execution belongs to the
+sibling `audit-orchestrator` skill.
 
-Each batch lives in `audits/<run-id>/` (run ids sort by creation time; the
-newest is current) with `run.yaml` as the state source: config snapshot +
-hash, scope file manifest + hashes, per-step skill entry hashes, and per-step
-status `PENDING/COMPLETED/FAILED/BLOCKED` with attempts
-`{at, status, note, report, log}` — report/log are frozen as copies under
-`steps/<N>/attempt-<k>-report|log…` so retries append, never overwrite.
-`revision == len(history)` holds as in ledgers; `record` is compare-and-swap
-via `--expected-revision`. A skill missing at prepare blocks its step while
-the rest of the batch stays executable, but such a step can never record
-COMPLETED (its entry was never fingerprinted).
+`import-audit --case-root D --handoff <manifest.yaml>` consumes one
+FINALIZED handoff bundle (schema `whitehexlabs.audit-handoff/v1`; producer
+side: audit-orchestrator's references/handoff-contract.md). Verification
+before any copying — no `--force`, any violation is exit 2:
 
-Ordering: a step may be recorded only after every earlier step has an
-execution result; after the first pass only FAILED/BLOCKED steps may be
-rerun, in original order; COMPLETED steps are terminal within a batch.
-COMPLETED means "the audit ran", never "no findings" — a completed step
-requires a real report, a log and a substantive note.
+1. schema is exactly supported;
+2. status is FINALIZED;
+3. analysis exists and its hash matches;
+4. all step artifact manifests exist;
+5. artifact manifest hashes match;
+6. canonical artifacts referenced by candidates exist;
+7. candidate count matches the manifest;
+8. candidate ids are unique;
+9. candidate hashes match;
+10. source artifact file hashes / directory tree hashes match;
+11. path traversal is rejected (all paths resolve inside the handoff run root);
+12. symlink escape is rejected;
+13. duplicate imports are detected by finalized manifest hash.
 
-`audit check` passes only when every step is COMPLETED and every frozen
-artifact still hashes correctly. The batch is stale — requiring
-`audit prepare --new` — when the config, any in-scope target file (content
-or file set) or any skill entry changes. Audit artifacts are written only
-under the case root, never into the audited target.
+Imported evidence lands in `<case-root>/imports/audit/<run-id>/`
+(`manifest.yaml`, `analysis.md`, `candidates/`, `artifact-manifests/`,
+`sources/`) and is immutable: the same manifest imported twice succeeds
+without changes; the same run id with a different manifest hash fails
+closed; previously imported evidence is never overwritten. After import,
+deleting the original audit workspace changes nothing here. The target
+source tree is not copied.
 
-Gating: while a config exists or a batch is present and not fresh-and-
-complete, `ingest` and `register` fail (exit 1); deleting the config does not
-bypass an unfinished batch. Registering under a complete batch additionally
-requires `sources.audit_round == <run-id>`, a written
-`audits/<run-id>/analysis.md`, and `sources.files` citing that analysis plus
-at least one raw step report (copied into evidence by the normal mechanism).
-`resume` reports batch progress, blocked steps and the next move even when
-no findings exist.
+For each audit candidate exactly one draft is scaffolded at
+`ingest/<run-id>/finding-source.A-XXX.yaml`: provenance pre-filled
+(auditor `audit-orchestrator`, original finding id, audit round, imported
+file references) and every prescreen aspect left UNKNOWN with TODO
+evidence/explanation — no bounty pre-screen answers are guessed. Nothing is
+registered automatically; the existing `register` gates reject unresolved
+TODO/UNKNOWN fields exactly as for hand-written sources. A valid
+zero-candidate handoff imports successfully: analysis and provenance are
+preserved, no drafts, no findings.

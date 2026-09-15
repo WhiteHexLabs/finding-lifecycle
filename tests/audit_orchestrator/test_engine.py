@@ -1,5 +1,6 @@
-"""Tests for the sequential audit entry: config validation, batch order,
-recovery, staleness and the ingest/register entry gate."""
+"""Engine tests: config validation, batch order, recovery, staleness.
+
+Preserved behaviors of the pre-split audit engine (plan.md section 5)."""
 
 import json
 import os
@@ -7,76 +8,19 @@ import unittest
 
 import yaml
 
-from test_lifecycle import Base, FINDING_SRC, REPO, run, wfile, wyaml
-
-
-def run_yaml(root, run_id):
-    with open(os.path.join(root, "audits", run_id, "run.yaml"), encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def current_run_id(root):
-    runs = sorted(d for d in os.listdir(os.path.join(root, "audits"))
-                  if d.startswith("run-"))
-    return runs[-1]
-
-
-class AuditBase(Base):
-    def setUp(self):
-        super().setUp()
-        self.target = os.path.join(self.tmp, "target")
-        self.skill_a = wfile(os.path.join(self.tmp, "skills", "alpha", "SKILL.md"),
-                             "---\nname: alpha-auditor\n---\n\n"
-                             "# alpha\n\nread every scope file and report findings.\n")
-        self.skill_b = wfile(os.path.join(self.tmp, "skills", "beta", "SKILL.md"),
-                             "---\nname: beta-auditor\n---\n\n"
-                             "# beta\n\ncheck invariants and report findings.\n")
-        wfile(os.path.join(self.target, "src", "Vault.sol"), "contract Vault {}\n")
-        wfile(os.path.join(self.target, "src", "Pool.sol"), "contract Pool {}\n")
-
-    def write_config(self, skills=None, scope=("src",), target_root=None):
-        wyaml(os.path.join(self.root, "audit-skills.yaml"), {
-            "target_root": target_root or self.target,
-            "scope": list(scope),
-            "skills": list(skills if skills is not None else [self.skill_a, self.skill_b]),
-        })
-
-    def prepare(self, *extra):
-        return run(["audit", "prepare", "--case-root", self.root, "--json", *extra])
-
-    def rid(self):
-        return current_run_id(self.root)
-
-    def rev(self):
-        return run_yaml(self.root, self.rid())["revision"]
-
-    def record(self, step, status, note="covered both contracts in scope; see report",
-               report=None, log=None, rev=None):
-        p = wyaml(os.path.join(self.tmp, f"result-{step}-{status}-{id(note) % 997}.yaml"),
-                  {"status": status, "note": note, "report": report, "log": log})
-        return run(["audit", "record", "--case-root", self.root, "--step", step,
-                    "--input", p,
-                    "--expected-revision", rev if rev is not None else self.rev()])
-
-    def complete_all(self):
-        """First pass: complete every step in order (zero-findings reports)."""
-        out = json.loads(self.prepare().stdout)
-        for st in out["steps"]:
-            report = wfile(os.path.join(self.tmp, f"report-{st['step']}.md"),
-                           f"# report {st['step']}\n\nno findings; both contracts covered\n")
-            log = wfile(os.path.join(self.tmp, f"log-{st['step']}.txt"),
-                        f"executed skill {st['step']}\n")
-            r = self.record(st["step"], "COMPLETED",
-                            note=f"skill {st['step']} covered src fully; zero findings",
-                            report=report, log=log)
-            self.assertEqual(r.returncode, 0, r.stderr)
+try:
+    from ._common import (REPO, AuditBase, legacy_result, run, wfile,
+                        write_analysis, wyaml, run_yaml)
+except ImportError:
+    from _common import (REPO, AuditBase, legacy_result, run, wfile,
+                        write_analysis, wyaml, run_yaml)
 
 
 # ---------------------------------------------------------------------------
 # config validation
 
 class TestAuditConfig(AuditBase):
-    def test_relative_target_root_resolves_against_case_root(self):
+    def test_relative_target_root_resolves_against_work_root(self):
         self.write_config(target_root=os.path.join("..", "target"))
         r = self.prepare()
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -84,17 +28,11 @@ class TestAuditConfig(AuditBase):
         self.assertEqual(len(out["steps"]), 2)
         self.assertTrue(os.path.isdir(os.path.join(self.root, "audits", out["run_id"])))
 
-    def test_empty_skills_is_config_error_without_fallback(self):
+    def test_empty_skills_is_config_error(self):
         self.write_config(skills=[])
         r = self.prepare()
         self.assertEqual(r.returncode, 2)
         self.assertIn("skills", r.stderr)
-        # the report-import entry must NOT open as a fallback
-        r = run(["ingest", "--case-root", self.root, "--scan-dir", self.tmp])
-        self.assertEqual(r.returncode, 1)
-        src = wyaml(os.path.join(self.tmp, "src.yaml"), FINDING_SRC)
-        r = run(["register", "--case-root", self.root, "--from", src])
-        self.assertEqual(r.returncode, 1)
 
     def test_unknown_config_keys_rejected(self):
         wyaml(os.path.join(self.root, "audit-skills.yaml"), {
@@ -119,7 +57,13 @@ class TestAuditConfig(AuditBase):
         self.assertIn("escapes target_root", r.stderr)
 
     def test_self_call_rejected(self):
-        self.write_config(skills=[os.path.join(REPO, "SKILL.md")])
+        self.write_config(skills=[os.path.join(REPO, "skills", "audit-orchestrator", "SKILL.md")])
+        r = self.prepare()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("itself", r.stderr)
+
+    def test_lifecycle_skill_rejected(self):
+        self.write_config(skills=[os.path.join(REPO, "skills", "finding-lifecycle", "SKILL.md")])
         r = self.prepare()
         self.assertEqual(r.returncode, 2)
         self.assertIn("itself", r.stderr)
@@ -137,7 +81,7 @@ class TestAuditConfig(AuditBase):
         r = self.record(2, "COMPLETED", report=report, log=log)
         self.assertEqual(r.returncode, 0, r.stderr)
         # but the batch can never pass while a step is BLOCKED
-        r = run(["audit", "check", "--case-root", self.root])
+        r = self.check()
         self.assertEqual(r.returncode, 1)
 
     def test_cannot_complete_step_whose_skill_never_loaded(self):
@@ -149,6 +93,14 @@ class TestAuditConfig(AuditBase):
                         note="pretending the missing skill ran fine")
         self.assertEqual(r.returncode, 2)
         self.assertIn("skill entry", r.stderr)
+
+    def test_deprecated_case_root_alias(self):
+        self.write_config()
+        r = run(["prepare", "--case-root", self.root, "--json"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("deprecated", r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(len(out["steps"]), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +115,7 @@ class TestAuditOrdering(AuditBase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("record them first", r.stderr)
 
-    def test_failure_continues_but_blocks_check_and_entry(self):
+    def test_failure_continues_but_blocks_check(self):
         self.write_config()
         self.prepare()
         r = self.record(1, "FAILED", note="skill crashed reading a contract; no report")
@@ -172,13 +124,8 @@ class TestAuditOrdering(AuditBase):
         log = wfile(os.path.join(self.tmp, "l2.txt"), "ran\n")
         r = self.record(2, "COMPLETED", report=report, log=log)
         self.assertEqual(r.returncode, 0, r.stderr)
-        # analysis/registration entry stays closed
-        r = run(["audit", "check", "--case-root", self.root])
-        self.assertEqual(r.returncode, 1)
-        src = wyaml(os.path.join(self.tmp, "src.yaml"), FINDING_SRC)
-        r = run(["register", "--case-root", self.root, "--from", src])
-        self.assertEqual(r.returncode, 1)
-        r = run(["ingest", "--case-root", self.root, "--scan-dir", self.tmp])
+        # audit completion stays blocked while a failure is unresolved
+        r = self.check()
         self.assertEqual(r.returncode, 1)
 
     def test_rerun_failed_step_then_check_passes(self):
@@ -193,7 +140,7 @@ class TestAuditOrdering(AuditBase):
         log1 = wfile(os.path.join(self.tmp, "l1.txt"), "ran\n")
         r = self.record(1, "COMPLETED", report=report1, log=log1)
         self.assertEqual(r.returncode, 0, r.stderr)
-        r = run(["audit", "check", "--case-root", self.root])
+        r = self.check()
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_retry_out_of_original_order_rejected(self):
@@ -208,7 +155,7 @@ class TestAuditOrdering(AuditBase):
     def test_zero_findings_report_completes(self):
         self.write_config()
         self.complete_all()
-        r = run(["audit", "check", "--case-root", self.root, "--json"])
+        r = run(["check", "--work-root", self.root, "--json"])
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
         self.assertEqual(out["status"], "PASS")
@@ -241,6 +188,19 @@ class TestAuditOrdering(AuditBase):
         r = self.record(1, "COMPLETED", report=report, rev=99)
         self.assertEqual(r.returncode, 2)
         self.assertIn("revision conflict", r.stderr)
+
+    def test_finalized_run_rejects_further_records(self):
+        self.write_config(skills=[self.skill_a])
+        self.complete_all()
+        rid = self.rid()
+        write_analysis(self.root, rid)
+        r = run(["finalize", "--work-root", self.root,
+                 "--expected-revision", str(self.rev())])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        report = wfile(os.path.join(self.tmp, "again.md"), "# again\n")
+        r = self.record(1, "FAILED", note="trying to mutate a finalized batch")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("finalized", r.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -283,26 +243,16 @@ class TestAuditRecovery(AuditBase):
         self.assertEqual(atts[0]["note"], "first attempt failed for the record")
         self.assertEqual(atts[-1]["status"], "COMPLETED")
 
-    def test_resume_reports_audit_without_findings(self):
-        self.write_config()
-        self.prepare()
-        self.record(1, "FAILED", note="blocked: skill needs a tool missing in this env")
-        r = run(["resume", "--case-root", self.root])
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("audit batch", r.stdout)
-        self.assertIn("step 1 FAILED", r.stdout)
-        self.assertIn("no findings registered", r.stdout)
-
 
 # ---------------------------------------------------------------------------
-# staleness: config / target / skill / report drift
+# staleness: config / target / skill / artifact drift
 
 class TestAuditStaleness(AuditBase):
     def test_config_change_requires_new_batch(self):
         self.write_config()
         self.complete_all()
         self.write_config(skills=[self.skill_b, self.skill_a])  # reorder = new hash
-        r = run(["audit", "check", "--case-root", self.root])
+        r = self.check()
         self.assertEqual(r.returncode, 1)
         self.assertIn("config changed", r.stdout + r.stderr)
         r = self.record(2, "FAILED", note="attempting to record into a stale batch")
@@ -315,7 +265,7 @@ class TestAuditStaleness(AuditBase):
         self.write_config()
         self.complete_all()
         wfile(os.path.join(self.target, "src", "Vault.sol"), "contract Vault2 {}\n")
-        r = run(["audit", "check", "--case-root", self.root])
+        r = self.check()
         self.assertEqual(r.returncode, 1)
         self.assertIn("scope drifted", r.stdout + r.stderr)
 
@@ -323,92 +273,114 @@ class TestAuditStaleness(AuditBase):
         self.write_config()
         self.complete_all()
         wfile(os.path.join(self.target, "src", "New.sol"), "contract New {}\n")
-        r = run(["audit", "check", "--case-root", self.root])
+        r = self.check()
         self.assertEqual(r.returncode, 1)
         self.assertIn("New.sol", r.stdout + r.stderr)
+
+    def test_target_file_deleted_requires_new_batch(self):
+        self.write_config()
+        self.complete_all()
+        os.remove(os.path.join(self.target, "src", "Pool.sol"))
+        r = self.check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("scope drifted", r.stdout + r.stderr)
 
     def test_skill_change_requires_new_batch(self):
         self.write_config()
         self.complete_all()
         wfile(self.skill_b, "# beta\n\ninstructions changed\n")
-        r = run(["audit", "check", "--case-root", self.root])
+        r = self.check()
         self.assertEqual(r.returncode, 1)
         self.assertIn("skill entry changed", r.stdout + r.stderr)
 
-    def test_tampered_report_fails_check(self):
-        self.write_config()
-        self.complete_all()
-        data = run_yaml(self.root, self.rid())
-        report_rel = data["steps"][0]["attempts"][-1]["report"]["path"]
-        wfile(os.path.join(self.root, report_rel), "# tampered after the fact\n")
-        r = run(["audit", "check", "--case-root", self.root])
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("hash mismatch", r.stdout + r.stderr)
-
-    def test_register_blocked_when_stale(self):
-        self.write_config()
-        self.complete_all()
-        wfile(self.skill_a, "# alpha changed\n")
-        src = wyaml(os.path.join(self.tmp, "src.yaml"), FINDING_SRC)
-        r = run(["register", "--case-root", self.root, "--from", src])
-        self.assertEqual(r.returncode, 1)
-
-
-# ---------------------------------------------------------------------------
-# ingest/register entry gating
-
-class TestAuditGating(AuditBase):
-    def test_ingest_blocked_before_prepare(self):
-        self.write_config()
-        r = run(["ingest", "--case-root", self.root, "--scan-dir", self.tmp])
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("audit", (r.stdout + r.stderr).lower())
-
-    def test_deleting_config_cannot_bypass_unfinished_batch(self):
-        self.write_config()
-        self.prepare()
-        self.record(1, "FAILED", note="blocked pending tool availability in this env")
-        os.remove(os.path.join(self.root, "audit-skills.yaml"))
-        r = run(["ingest", "--case-root", self.root, "--scan-dir", self.tmp])
-        self.assertEqual(r.returncode, 1)
-        src = wyaml(os.path.join(self.tmp, "src.yaml"), FINDING_SRC)
-        r = run(["register", "--case-root", self.root, "--from", src])
-        self.assertEqual(r.returncode, 1)
-
-    def test_register_requires_batch_references_when_complete(self):
+    def test_tampered_canonical_artifact_fails_check(self):
         self.write_config()
         self.complete_all()
         rid = self.rid()
-        # plain source without batch linkage -> rejected
-        src = wyaml(os.path.join(self.tmp, "src.yaml"), FINDING_SRC)
-        r = run(["register", "--case-root", self.root, "--from", src])
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("audit_round", r.stderr)
-        # proper source: analysis + both raw step reports
         data = run_yaml(self.root, rid)
-        reports = [att["report"]["path"]
-                   for st in data["steps"] for att in st["attempts"]]
-        wfile(os.path.join(self.root, "audits", rid, "analysis.md"),
-              "# Analysis\n\none distinct root cause across both skills\n")
-        doc = yaml.safe_load(yaml.safe_dump(FINDING_SRC))
-        doc["sources"]["audit_round"] = rid
-        doc["sources"]["files"] = (
-            [{"path": f"audits/{rid}/analysis.md", "note": "batch analysis"}]
-            + [{"path": p, "note": "raw step report"} for p in reports])
-        src = wyaml(os.path.join(self.tmp, "src2.yaml"), doc)
-        r = run(["register", "--case-root", self.root, "--from", src, "--json"])
-        self.assertEqual(r.returncode, 0, r.stderr)
-        fid = json.loads(r.stdout)["id"]
-        copied = os.listdir(os.path.join(self.root, "evidence", fid, "sources"))
-        self.assertIn("analysis.md", copied)
-        self.assertEqual(len([c for c in copied if "attempt-1-report" in c]), 2)
+        report_rel = data["steps"][0]["attempts"][-1]["report"]["path"]
+        wfile(os.path.join(self.root, report_rel), "# tampered after the fact\n")
+        r = self.check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("hash mismatch", r.stdout + r.stderr)
 
-    def test_no_config_no_batch_keeps_old_entry(self):
-        r = run(["ingest", "--case-root", self.root, "--scan-dir", self.tmp])
+    def test_tampered_manifest_fails_check(self):
+        self.write_config()
+        self.complete_all()
+        rid = self.rid()
+        mp = os.path.join(self.root, "audits", rid, "steps", "1", "artifact-manifest.yaml")
+        with open(mp, encoding="utf-8") as f:
+            m = yaml.safe_load(f)
+        m["artifacts"][0]["sha256"] = "0" * 64
+        with open(mp, "w", encoding="utf-8") as f:
+            yaml.safe_dump(m, f)
+        r = self.check()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("hash mismatch", r.stdout + r.stderr)
+
+
+# ---------------------------------------------------------------------------
+# legacy batch compatibility (pre-split layout)
+
+class TestLegacyBatches(AuditBase):
+    def legacy_complete(self):
+        """Record with the legacy flat result shape (no schema/primary)."""
+        out = json.loads(self.prepare().stdout)
+        for st in out["steps"]:
+            report = wfile(os.path.join(self.tmp, f"lrep-{st['step']}.md"),
+                           f"# legacy report {st['step']}\n\ncovered everything\n")
+            log = wfile(os.path.join(self.tmp, f"llog-{st['step']}.txt"), "ran\n")
+            p = legacy_result(os.path.join(self.tmp, f"lres-{st['step']}.yaml"),
+                              report=report, log=log,
+                              note=f"legacy skill {st['step']} covered src fully")
+            r = run(["record", "--work-root", self.root, "--step", st["step"],
+                     "--input", p, "--expected-revision",
+                     run_yaml(self.root, self.rid())["revision"]])
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_legacy_result_shape_accepted(self):
+        self.write_config()
+        self.legacy_complete()
+        r = self.check()
         self.assertEqual(r.returncode, 0, r.stderr)
-        src = wyaml(os.path.join(self.tmp, "src.yaml"), FINDING_SRC)
-        r = run(["register", "--case-root", self.root, "--from", src])
+
+    def test_legacy_completed_step_exposed_as_manifest_at_finalize(self):
+        import hashlib
+
+        def sha(p):
+            return hashlib.sha256(open(p, "rb").read()).hexdigest()
+
+        self.write_config(skills=[self.skill_a])
+        rid = json.loads(self.prepare().stdout)["run_id"]
+        # rewrite step 1 into the pre-split layout: frozen copies directly
+        # under steps/<N>/, attempt dicts without canonical artifacts
+        report_rel = f"audits/{rid}/steps/1/attempt-1-report.md"
+        wfile(os.path.join(self.root, report_rel), "# legacy report\n\ncovered\n")
+        log_rel = f"audits/{rid}/steps/1/attempt-1-log.txt"
+        wfile(os.path.join(self.root, log_rel), "ran\n")
+        data = run_yaml(self.root, rid)
+        st = data["steps"][0]
+        st["status"] = "COMPLETED"
+        st["attempts"] = [{
+            "at": "2026-01-01T00:00:00+00:00", "status": "COMPLETED",
+            "note": "legacy completed attempt recorded by the old tool",
+            "report": {"path": report_rel, "sha256": sha(os.path.join(self.root, report_rel))},
+            "log": {"path": log_rel, "sha256": sha(os.path.join(self.root, log_rel))},
+        }]
+        wyaml(os.path.join(self.root, "audits", rid, "run.yaml"), data)
+        # no artifact-manifest.yaml exists yet (legacy layout)
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.root, "audits", rid, "steps", "1", "artifact-manifest.yaml")))
+        write_analysis(self.root, rid)
+        r = run(["finalize", "--work-root", self.root, "--expected-revision", "1"])
         self.assertEqual(r.returncode, 0, r.stderr)
+        # the adapter synthesized a manifest from the frozen copies
+        mp = os.path.join(self.root, "audits", rid, "steps", "1", "artifact-manifest.yaml")
+        self.assertTrue(os.path.isfile(mp))
+        with open(mp, encoding="utf-8") as f:
+            m = f.read()
+        self.assertIn("primary-report", m)
+        self.assertIn("legacy-frozen-copy", m)
 
 
 if __name__ == "__main__":

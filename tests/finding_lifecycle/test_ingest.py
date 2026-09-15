@@ -6,7 +6,10 @@ import unittest
 
 import yaml
 
-from test_lifecycle import Base, FINDING_SRC, run, wfile, wyaml
+try:
+    from .test_lifecycle import Base, FINDING_SRC, run, wfile, wyaml
+except ImportError:
+    from test_lifecycle import Base, FINDING_SRC, run, wfile, wyaml
 
 
 def drafts(root):

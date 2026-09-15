@@ -1,0 +1,36 @@
+# result.yaml — the Skill -> Orchestrator interface for ONE audit step.
+# Copy next to your execution, fill it in, then:
+#   audit.py record --work-root <dir> --step N --input result.yaml \
+#       --expected-revision R
+# Paths resolve relative to the work root; absolute and ~/ paths allowed.
+# The legacy flat shape {status, note, report, log} is still accepted, but
+# new executions should use this v1 schema.
+
+schema: whitehexlabs.audit-result/v1
+
+status: COMPLETED          # COMPLETED | FAILED | BLOCKED
+
+note: >-
+  Substantive summary, >= 20 characters: what ran, what was covered, and
+  why it ended in this status. Zero findings still need the real report
+  and a coverage statement here.
+
+primary:
+  report: /actual/or/relative/path/report.md   # required for COMPLETED
+  log: /actual/or/relative/path/run.log        # recommended
+
+artifacts:                  # optional supporting evidence
+  - path: /path/findings.json
+    type: findings          # report|log|findings|poc|trace|coverage|subagent-results|analysis|other
+    note: structured finding output
+
+  - path: /path/poc
+    type: poc
+    note: proof-of-concept directory (copied recursively, tree-hashed)
+
+# Rules enforced by `record`:
+#   - declared paths must exist and must NOT live inside the audited target
+#   - symlinks are rejected as artifact sources
+#   - key/credential material is rejected (never copy secrets)
+#   - if the primary report cannot be determined unambiguously, record the
+#     step BLOCKED with a note naming the candidates — never guess

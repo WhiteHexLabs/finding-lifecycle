@@ -1,0 +1,32 @@
+# audit-candidate.yaml — ONE consolidated root cause from the audit run.
+# Author at audits/<run-id>/candidates/A-001.yaml (filename must match the
+# id). Verified by `audit.py finalize`; prefer references through artifact
+# IDs over arbitrary external paths.
+
+schema: whitehexlabs.audit-candidate/v1
+
+id: A-001                  # A-<digits>; unique within the run
+title: ""
+claim: ""
+
+root_cause:
+  summary: ""              # the underlying cause, deduplicated across skills
+  mechanism: ""            # how it is exploited / how it fails
+
+sources:                   # >= 1; every contributing audit skill step
+  - step: 1
+    skill_name: ""         # as recorded in the step's artifact manifest
+    original_finding_id: null
+    artifact_manifest: ../steps/1/artifact-manifest.yaml
+    report:
+      artifact_id: primary-report
+    locations: []          # e.g. ["src/Vault.sol:42"]
+    note: ""
+
+preconditions: []
+affected_code: []
+disagreements: []          # auditor disagreements, preserved verbatim
+coverage_gaps: []
+
+severity_hint: null        # advisory only; finding-lifecycle decides finally
+confidence_hint: null

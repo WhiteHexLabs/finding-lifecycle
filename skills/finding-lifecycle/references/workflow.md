@@ -1,9 +1,12 @@
 # Workflow — the eight stages in practice
 
-Operating manual. State/gate contracts: references/contracts.md. Two red lines
+Operating manual. State/gate contracts: references/contracts.md; the audit
+handoff interface: references/handoff-contract.md. Two red lines
 apply at every stage: **never modify target protocol code** (fix ideas go into
 the report's remediation attachment only; PoCs use separate attack contracts)
 and **never disclose publicly** (controlled private channels only).
+This skill never executes audit skills — use `audit-orchestrator` for that
+(entry 0A consumes its output).
 
 Conventions: `lc()` is `python3 <skill-root>/scripts/lifecycle.py`. Every
 mutating command needs `--case-root` and `--expected-revision` (the current
@@ -40,11 +43,43 @@ ledger. Deduplicate against the index and era map first. Pre-screen FAILs print
 a hint to `close --disposition INELIGIBLE --reason ... --evidence ...`; UNKNOWNs
 become blockers — neither is a technical refutation.
 
-### Default entry: batch discovery of audit outputs
+### Entry 0A — canonical audit handoff (`import-audit`)
 
-`ingest` is the DEFAULT entry move (run it on every pickup; it is
-idempotent). It bridges arbitrary audit skills to the register entry point
-by NAME only — it never parses contents:
+When `audit-orchestrator` finished a run and finalized its handoff:
+
+```bash
+lc import-audit --case-root <dir> --handoff <work-root>/audits/<run-id>/handoff/manifest.yaml
+```
+
+The import verifies the bundle end to end (schema, FINALIZED status,
+analysis/candidate/artifact-manifest hashes, source artifact file/tree
+hashes; path traversal and symlink escapes rejected; duplicates detected by
+manifest hash — same hash twice is an idempotent no-op, same run id with a
+different hash fails closed), then copies immutable evidence into:
+
+```text
+<case-root>/imports/audit/<run-id>/
+├── manifest.yaml        # the finalized handoff manifest (import key)
+├── analysis.md          # consolidated audit analysis
+├── candidates/          # audit candidates (A-001.yaml…)
+├── artifact-manifests/  # per-step canonical manifests
+└── sources/             # every canonical artifact the manifests bind
+```
+
+After import the case is independent of the original audit workspace —
+moving or deleting it changes nothing here. The target source tree is not
+copied. One TODO draft per candidate is scaffolded at
+`ingest/<run-id>/finding-source.A-001.yaml` with provenance pre-filled
+(auditor `audit-orchestrator`, original id, audit round, imported files);
+every prescreen stays UNKNOWN/TODO — imports never register or pre-screen.
+Zero-candidate handoffs import fine (analysis preserved, no drafts).
+
+### Entry 0B — generic artifact discovery (`ingest`)
+
+Without a canonical handoff, `ingest` is the default entry move (run it on
+every pickup; it is idempotent). It bridges arbitrary audit skills to the
+register entry point by NAME only — it never parses contents, and it never
+heuristically parses canonical handoffs (use 0A for those):
 
 ```bash
 lc ingest --case-root <dir> [--scan-dir DIR] [--pattern audit] [--json]
@@ -55,74 +90,20 @@ name contains the pattern, skipping hidden/junk dirs and the case root itself.
 A matching directory becomes one bundle; a matching file is a standalone
 source. Each bundle scaffolds a draft `ingest/finding-source.<slug>.yaml`
 listing the source files (absolute paths, copied into evidence at register
-time). Complete every TODO in the draft — one file per distinct root cause —
-resolve the duplication prescreen to PASS, then `register --from` each.
-`register` rejects unresolved TODO fields by design: discovery is mechanical,
-the claim and the dedup judgment stay with you. Rerunning `ingest` is
-idempotent (existing drafts are skipped).
+time).
 
-## 0b. Sequential audit entry (with audit-skills.yaml)
+### Entry 0C — manual finding source
 
-When `<case-root>/audit-skills.yaml` exists (template:
-`templates/audit-skills.yaml`), discovery starts from a configured, ordered
-audit instead of name-based scanning — and `ingest`/`register` stay gated
-until that audit completes. The config names the target tree, the scope
-inside it and the local SKILL.md files to execute:
+Hand-write the `finding-source.yaml` below and `register --from` it.
 
-```yaml
-target_root: /absolute/path/to/protocol   # or relative to this file; ~ allowed
-scope: [src]                              # non-empty, inside target_root
-skills:                                   # non-empty, IN EXECUTION ORDER
-  - ~/.agents/skills/example-auditor/SKILL.md
-```
+### Completing drafts and registering
 
-Nothing is guessed, installed or executed by the CLI: you read each SKILL.md
-and follow it in the current session, sequentially (no sub-agent scheduler).
-Loop per step:
-
-```bash
-lc audit prepare --case-root <dir> [--new]   # create/recover batch; prints next skill + artifact dir
-#   read audits/<run-id>/steps/<N>'s SKILL.md; run that audit against the scope;
-#   write the raw report + log into audits/<run-id>/steps/<N>/
-lc audit record --case-root <dir> --step N --input result.yaml --expected-revision R
-lc audit check  --case-root <dir>            # every step COMPLETED + artifacts fresh?
-```
-
-`result.yaml` per step (`report`/`log` paths resolve relative to the case
-root; absolute allowed; both are required for COMPLETED and get frozen as
-copies `steps/<N>/attempt-<k>-report|log…`, so retries never overwrite
-history):
-
-```yaml
-status: COMPLETED | FAILED | BLOCKED
-note: ...        # substantive: what ran, what was covered, why this status
-report: <path>   # zero findings still need the real report + coverage note
-log: <path>
-```
-
-Enforced rules: steps record strictly in order (no skipping unexecuted
-items); after the first pass only FAILED/BLOCKED steps may be rerun — in
-their original order; COMPLETED steps are terminal within a batch. The batch
-fingerprints the config, every in-scope target file and each SKILL.md: any
-drift (including target edits made by a sub-skill) stales the batch →
-`audit prepare --new`. A missing SKILL.md blocks its step at prepare while
-other steps still run. A sub-skill demanding wider permissions or
-target-source edits is recorded BLOCKED with the specific demand — never
-silently "completed". Audit artifacts are written only under the case root,
-never into the audited target.
-
-After `audit check` passes, aggregate BEFORE registering: read ALL step
-reports and write `audits/<run-id>/analysis.md` — merge duplicate leads by
-root cause, keeping each audit's source, locations, disagreements,
-preconditions and coverage gaps. Zero candidates: record that conclusion in
-analysis.md and stop (no placeholder findings, no "protocol is safe"
-claims). Otherwise write one finding-source.yaml per distinct root cause
-with `sources.audit_round: <run-id>` and `sources.files` citing analysis.md
-plus the related raw step reports (they are copied into evidence at
-register time), then `register --from` each and continue at §1. Do NOT use
-`ingest` to collect batch artifacts — read the batch-registered files
-directly. `resume` reports batch progress, blocked steps and the next move
-even when no findings exist yet.
+Complete every TODO in whichever drafts you have — one file per distinct
+root cause — resolve the duplication prescreen to PASS, then
+`register --from` each. `register` rejects unresolved TODO fields by
+design: discovery is mechanical, the claim and the dedup judgment stay
+with you. Rerunning `ingest` is idempotent (existing drafts are skipped).
+A legacy `audit-skills.yaml` in the case root only prints a warning.
 
 ## 1. Prior-art check (→ PRIOR_ART_CHECKED)
 
@@ -360,9 +341,8 @@ Routine inspection: `lc resume --case-root <dir>` (also rebuilds a broken index)
 ## 9. Boundaries of this version
 
 EVM + Foundry fork only; entry-point agnostic (any audit output that yields a
-claim + targets works). The sequential audit entry executes configured skills
-one by one in the current session — no sub-agent scheduler, no model routing,
-no skill auto-installation; the CLI validates config, order, state and
-artifacts only. No database, no web UI, no auditor-plugin system, no
+claim + targets works). This skill does not execute audits — the sibling
+`audit-orchestrator` skill runs configured audit skills and hands over a
+finalized bundle (§0A). No database, no web UI, no auditor-plugin system, no
 auto-submission service, no secret gists — delivery goes
 through private repositories and platform-private attachments only.

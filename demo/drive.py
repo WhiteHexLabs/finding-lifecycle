@@ -43,7 +43,7 @@ import yaml
 
 DEMO = Path(__file__).resolve().parent
 REPO = DEMO.parent
-LC = [sys.executable, str(REPO / "scripts" / "lifecycle.py")]
+LC = [sys.executable, str(REPO / "skills" / "finding-lifecycle" / "scripts" / "lifecycle.py")]
 FORGE_STD_REF = "foundry-rs/forge-std@v1.9.7"
 SEED_ETH = 10
 STAKE_ETH = 1

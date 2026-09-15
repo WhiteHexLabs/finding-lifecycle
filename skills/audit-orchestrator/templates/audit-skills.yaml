@@ -1,7 +1,5 @@
-# audit-skills.yaml — sequential audit entry configuration for ONE case root.
-# Copy to <case-root>/audit-skills.yaml and fill it in. While this file exists
-# (or an unfinished audits/ batch is present), `ingest` and `register` stay
-# gated until the audit batch completes — there is no fallback entry.
+# audit-skills.yaml — audit-orchestrator configuration for ONE work root.
+# Copy to <work-root>/audit-skills.yaml and fill it in.
 #
 # Paths are relative to this config file; absolute paths and ~ are allowed.
 # The CLI only validates paths, order and artifacts — it never executes
@@ -10,9 +8,9 @@ target_root: /absolute/path/to/protocol   # the protocol source tree to audit
 scope:                                    # non-empty list of files/dirs inside target_root
   - src
 # skills: executed IN THIS ORDER — each entry points directly at a local
-# SKILL.md (no name guessing, no auto-install; duplicates and
-# finding-lifecycle itself are rejected). Defaults below are the local
-# ~/.zcode/skills pipeline; edit to match your machine.
+# SKILL.md (no name guessing, no auto-install; duplicates and the
+# orchestrator/finding-lifecycle themselves are rejected). Defaults below
+# are one local ~/.zcode/skills pipeline; edit to match your machine.
 skills:
   - ~/.zcode/skills/x-ray/SKILL.md
   - ~/.zcode/skills/solidity-auditor/SKILL.md

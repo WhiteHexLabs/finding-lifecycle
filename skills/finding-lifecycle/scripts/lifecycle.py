@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """finding-lifecycle CLI.
 
-Post-discovery lifecycle for smart-contract vulnerability findings: a
+Post-audit lifecycle for smart-contract vulnerability findings: a
 Markdown ledger per finding is the single source of truth; this tool only
 performs validated, locked, atomic, revision-checked transitions.
+
+This skill never executes audit skills. Findings enter through:
+  0A. `import-audit` — a finalized audit-orchestrator handoff bundle
+  0B. `ingest`       — name-based discovery of arbitrary audit artifacts
+  0C. `register`     — a manually authored finding-source.yaml
 
 Design contracts (see references/contracts.md):
   - exit codes: 0 success, 1 gate not passed, 2 input or runtime error
@@ -1344,48 +1349,21 @@ def reject_todo(label: str, value) -> None:
             "before registering")
 
 
-def validate_audit_sourced(root: str, run: dict, sources: dict, files_list: list) -> None:
-    """Findings registered under a complete audit batch must cite its analysis
-    and at least one raw step report (copies happen via the normal files path)."""
-    rid = run["run_id"]
-    if sources.get("audit_round") != rid:
-        raise LifecycleError(
-            f"finding source: sources.audit_round must be the current audit batch {rid!r} "
-            f"(found {sources.get('audit_round')!r})")
-    analysis_rel = f"audits/{rid}/analysis.md"
-    analysis_real = os.path.realpath(safe_rel(root, analysis_rel, "audit analysis"))
-    if not os.path.isfile(analysis_real):
-        raise LifecycleError(
-            f"finding source: the current audit batch has no analysis file; write "
-            f"{analysis_rel} and reference it from sources.files before registering")
-    report_real = set()
-    for st in run.get("steps") or []:
-        for att in st.get("attempts") or []:
-            spec = att.get("report")
-            if isinstance(spec, dict) and spec.get("path"):
-                report_real.add(os.path.realpath(safe_rel(root, spec["path"], "step report")))
-    referenced = set()
-    for f_ in files_list:
-        f_ = as_dict(f_, "finding source: sources.files")
-        origin = f_.get("path")
-        if isinstance(origin, str) and origin.strip():
-            expanded = os.path.expanduser(origin)
-            if not os.path.isabs(expanded):
-                in_root = os.path.join(root, expanded)
-                expanded = in_root if os.path.isfile(in_root) else expanded
-            referenced.add(os.path.realpath(expanded))
-    if analysis_real not in referenced:
-        raise LifecycleError(
-            f"finding source: sources.files must reference the batch analysis file {analysis_rel}")
-    if not referenced & report_real:
-        raise LifecycleError(
-            "finding source: sources.files must reference at least one raw step report "
-            f"of batch {rid} (audits/{rid}/steps/<N>/attempt-<k>-report…)")
+AUDIT_CONFIG_NAME = "audit-skills.yaml"
+HANDOFF_SCHEMA = "whitehexlabs.audit-handoff/v1"
+ARTIFACTS_SCHEMA = "whitehexlabs.audit-artifacts/v1"
+
+
+def warn_legacy_audit_config(root: str) -> None:
+    """A legacy audit-skills.yaml only warns; audit execution moved out."""
+    if os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME)):
+        print("NOTE: audit-skills.yaml is no longer executed by finding-lifecycle.\n"
+              "Use audit-orchestrator for audit execution.", file=sys.stderr)
 
 
 def cmd_register(a) -> int:
     root = require_case(a)
-    audit_run = audit_gate(root)
+    warn_legacy_audit_config(root)
     program = load_program(root)
     inp = load_yaml_file(a.src, "finding source")
     restrict_keys(inp, {"title", "claim", "program_id", "sources", "prescreen", "targets"},
@@ -1403,8 +1381,6 @@ def cmd_register(a) -> int:
         raise LifecycleError("finding source: sources must include auditor, original_finding_id, or files (traceable origin)")
     reject_todo("sources.auditor", sources.get("auditor"))
     files_list = as_list(sources.get("files") or [], "finding source: sources.files")
-    if audit_run is not None:
-        validate_audit_sourced(root, audit_run, sources, files_list)
 
     prescreen = as_list(inp.get("prescreen") or [], "finding source: prescreen")
     aspects = {}
@@ -1554,7 +1530,7 @@ targets: []
 
 def cmd_ingest(a) -> int:
     root = require_case(a)
-    audit_gate(root)
+    warn_legacy_audit_config(root)
     root_real = os.path.realpath(root)
     scan = os.path.realpath(a.scan_dir or os.getcwd())
     if not os.path.isdir(scan):
@@ -1621,496 +1597,263 @@ def cmd_ingest(a) -> int:
 
 
 # ---------------------------------------------------------------------------
-# audit entry: sequential execution of configured local audit skills
-#
-# The CLI manages config, state, artifacts and order — it never executes
-# skill content. The operator (the current session) reads each SKILL.md and
-# follows it; `audit record` freezes the outcome plus report/log copies.
+# import-audit: canonical handoff import (audit-orchestrator -> lifecycle)
 
-AUDIT_CONFIG_NAME = "audit-skills.yaml"
-AUDIT_RESULT_STATUSES = ["COMPLETED", "FAILED", "BLOCKED"]
-SELF_SKILL_MD = os.path.realpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), os.pardir, "SKILL.md"))
-
-
-def resolve_external_path(base_dir: str, value, what: str) -> str:
-    """Resolve a config path: relative to base_dir, absolute or ~/ allowed."""
-    if not isinstance(value, str) or not value.strip():
-        raise LifecycleError(f"{what}: expected a non-empty path")
-    v = os.path.expanduser(value)
-    if not os.path.isabs(v):
-        v = os.path.join(base_dir, v)
-    return os.path.realpath(v)
+def _handoff_resolve(base: str, confine: str, rel, what: str) -> str:
+    """Resolve a handoff-relative path (against `base`) while staying inside
+    the handoff run root (`confine`); reject traversal and escapes."""
+    if not isinstance(rel, str) or not rel.strip():
+        raise LifecycleError(f"handoff manifest: {what} missing")
+    if os.path.isabs(rel):
+        raise LifecycleError(f"handoff manifest: {what} must be relative: {rel!r}")
+    p = os.path.realpath(os.path.join(base, rel))
+    c = os.path.realpath(confine)
+    if p != c and not p.startswith(c + os.sep):
+        raise LifecycleError(f"handoff manifest: {what} escapes the handoff run root: {rel!r}")
+    return p
 
 
-def load_audit_config(root: str):
-    """Load audit-skills.yaml; returns (normalized config or None, path)."""
-    path = os.path.join(root, AUDIT_CONFIG_NAME)
-    if not os.path.isfile(path):
-        return None, path
-    cfg = load_yaml_file(path, AUDIT_CONFIG_NAME)
-    restrict_keys(cfg, {"target_root", "scope", "skills"}, AUDIT_CONFIG_NAME)
-    target_root = resolve_external_path(root, cfg.get("target_root"),
-                                        f"{AUDIT_CONFIG_NAME}: target_root")
-    if not os.path.isdir(target_root):
+def _verify_tree(path: str, expected_tree: str, expected_count, what: str) -> None:
+    """Deterministic tree digest identical to audit-orchestrator's."""
+    records = []
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            relp = os.path.relpath(full, path).replace(os.sep, "/")
+            records.append((relp, sha256_file(full)))
+    records.sort()
+    stream = "".join(f"{r}\0{d}\n" for r, d in records)
+    digest = sha256_bytes(stream.encode("utf-8"))
+    if digest != expected_tree or len(records) != expected_count:
+        raise LifecycleError(f"{what}: directory tree hash mismatch: {path}")
+
+
+def verify_handoff(manifest_path: str) -> dict:
+    """Verify a finalized handoff bundle end to end; returns the manifest.
+
+    Checks: schema, FINALIZED status, analysis existence+hash, artifact
+    manifests existence+hash, canonical artifact existence+hash/tree-hash,
+    candidate count+uniqueness+hashes. Path traversal and symlink escape
+    are rejected by resolution. Raises LifecycleError on any violation."""
+    manifest_path = os.path.realpath(manifest_path)
+    if not os.path.isfile(manifest_path):
+        raise LifecycleError(f"handoff manifest not found: {manifest_path}")
+    m = load_yaml_file(manifest_path, "handoff manifest")
+    restrict_keys(m, {"schema", "run_id", "status", "created_at", "target",
+                      "audit", "steps", "candidates", "candidate_count"},
+                  "handoff manifest")
+    if m.get("schema") != HANDOFF_SCHEMA:
         raise LifecycleError(
-            f"{AUDIT_CONFIG_NAME}: target_root is not an existing directory: {target_root}")
-    scope = as_list(cfg.get("scope"), f"{AUDIT_CONFIG_NAME}: scope")
-    if not scope:
+            f"handoff manifest: unsupported schema {m.get('schema')!r}; expected {HANDOFF_SCHEMA}")
+    if m.get("status") != "FINALIZED":
         raise LifecycleError(
-            f"{AUDIT_CONFIG_NAME}: scope must be a non-empty list of files/directories "
-            "inside target_root")
-    scope_paths = []
-    for i, entry in enumerate(scope):
-        p = resolve_external_path(target_root, entry, f"{AUDIT_CONFIG_NAME}: scope[{i}]")
-        if not (p == target_root or p.startswith(target_root + os.sep)):
+            f"handoff manifest: status must be FINALIZED, got {m.get('status')!r}")
+    run_id = as_str(m.get("run_id"), "handoff manifest: run_id")
+    if not re.fullmatch(r"run-[0-9A-Za-z._-]+", run_id):
+        raise LifecycleError(f"handoff manifest: malformed run_id {run_id!r}")
+    hdir = os.path.dirname(manifest_path)
+    rdir = os.path.dirname(hdir)  # audits/<run-id>/
+
+    audit_block = as_dict(m.get("audit") or {}, "handoff manifest: audit")
+    analysis = as_dict(audit_block.get("analysis") or {},
+                       "handoff manifest: audit.analysis")
+    apath = _handoff_resolve(hdir, rdir, analysis.get("path"), "audit.analysis.path")
+    if not os.path.isfile(apath):
+        raise LifecycleError(f"handoff analysis missing: {analysis.get('path')!r}")
+    if sha256_file(apath) != analysis.get("sha256"):
+        raise LifecycleError("handoff analysis hash mismatch")
+
+    steps = as_list(m.get("steps"), "handoff manifest: steps")
+    if not steps:
+        raise LifecycleError("handoff manifest: steps must not be empty")
+    for i, s in enumerate(steps):
+        s = as_dict(s, f"handoff manifest: steps[{i}]")
+        am = as_dict(s.get("artifact_manifest") or {},
+                     f"handoff manifest: steps[{i}].artifact_manifest")
+        mp = _handoff_resolve(hdir, rdir, am.get("path"),
+                              f"steps[{i}].artifact_manifest.path")
+        if not os.path.isfile(mp):
             raise LifecycleError(
-                f"{AUDIT_CONFIG_NAME}: scope[{i}] escapes target_root: {entry!r}")
-        if not os.path.exists(p):
+                f"step {s.get('step')}: artifact manifest missing: {am.get('path')!r}")
+        if sha256_file(mp) != am.get("sha256"):
+            raise LifecycleError(f"step {s.get('step')}: artifact manifest hash mismatch")
+        # every canonical artifact the manifest binds must exist and hash right
+        am_doc = load_yaml_file(mp, "artifact manifest")
+        if am_doc.get("schema") != ARTIFACTS_SCHEMA:
             raise LifecycleError(
-                f"{AUDIT_CONFIG_NAME}: scope[{i}] not found under target_root: {entry!r}")
-        scope_paths.append(p)
-    skills = as_list(cfg.get("skills"), f"{AUDIT_CONFIG_NAME}: skills")
-    if not skills:
-        raise LifecycleError(
-            f"{AUDIT_CONFIG_NAME}: skills list is empty — configure at least one local "
-            "SKILL.md; an empty configured audit must not fall back to report import")
-    skill_paths = []
-    for i, s in enumerate(skills):
-        p = resolve_external_path(root, s, f"{AUDIT_CONFIG_NAME}: skills[{i}]")
-        if p in skill_paths:
-            raise LifecycleError(f"{AUDIT_CONFIG_NAME}: duplicate skill path: {s!r}")
-        if p == SELF_SKILL_MD:
-            raise LifecycleError(
-                f"{AUDIT_CONFIG_NAME}: skills must not include finding-lifecycle itself")
-        skill_paths.append(p)
-    return {"path": os.path.realpath(path), "target_root": target_root,
-            "scope": scope_paths, "skills": skill_paths}, path
+                f"step {s.get('step')}: artifact manifest schema must be {ARTIFACTS_SCHEMA}")
+        sdir = os.path.dirname(mp)
+        for j, e in enumerate(as_list(am_doc.get("artifacts"),
+                                      "artifact manifest: artifacts")):
+            e = as_dict(e, f"artifact manifest: artifacts[{j}]")
+            relp = e.get("path")
+            if not isinstance(relp, str) or not relp.strip() or os.path.isabs(relp):
+                raise LifecycleError(
+                    f"step {s.get('step')}: artifact {e.get('id')!r} has an invalid path")
+            full = os.path.realpath(os.path.join(sdir, relp))
+            if not full.startswith(os.path.realpath(sdir) + os.sep):
+                raise LifecycleError(
+                    f"step {s.get('step')}: artifact {e.get('id')!r} escapes its step dir")
+            if not os.path.exists(full):
+                raise LifecycleError(
+                    f"step {s.get('step')}: source artifact missing: {relp}")
+            if os.path.isdir(full):
+                _verify_tree(full, e.get("tree_sha256"), e.get("file_count"),
+                             f"step {s.get('step')}: artifact {e.get('id')!r}")
+            elif sha256_file(full) != e.get("sha256"):
+                raise LifecycleError(
+                    f"step {s.get('step')}: source artifact hash mismatch: {relp}")
+
+    cands = as_list(m.get("candidates"), "handoff manifest: candidates")
+    if m.get("candidate_count") != len(cands):
+        raise LifecycleError("handoff manifest: candidate_count != len(candidates)")
+    ids = set()
+    for i, c in enumerate(cands):
+        c = as_dict(c, f"handoff manifest: candidates[{i}]")
+        cid = as_str(c.get("id"), f"handoff manifest: candidates[{i}].id")
+        if cid in ids:
+            raise LifecycleError(f"handoff manifest: duplicate candidate id {cid!r}")
+        ids.add(cid)
+        cp = _handoff_resolve(hdir, rdir, c.get("path"), f"candidates[{i}].path")
+        if not os.path.isfile(cp):
+            raise LifecycleError(f"candidate {cid}: file missing: {c.get('path')!r}")
+        if sha256_file(cp) != c.get("sha256"):
+            raise LifecycleError(f"candidate {cid}: hash mismatch")
+    return m
 
 
-def audits_root(root: str) -> str:
-    return os.path.join(root, "audits")
+def render_handoff_draft(run_id: str, cand: dict, files: list) -> str:
+    file_lines = "\n".join(
+        f'    - path: "{f}"\n      note: "scaffolded by import-audit from handoff {run_id}"'
+        for f in files)
+    return f'''# Draft scaffolded by `import-audit` from finalized handoff {run_id}.
+# Provenance fields are pre-filled from audit candidate {cand.get("id")};
+# every TODO must still be completed by hand (import never registers or
+# pre-screens findings), then:
+#   lifecycle.py register --case-root <root> --from <this-file>
+title: {json.dumps(cand.get("title"))}
+claim: {json.dumps(cand.get("claim"))}
+sources:
+  auditor: "audit-orchestrator"
+  original_finding_id: "{cand.get("id")}"
+  audit_round: "{run_id}"
+  files:
+{file_lines}
+prescreen:
+  - {{aspect: scope, status: UNKNOWN, evidence: "TODO", explanation: "TODO: is the target within program scope"}}
+  - {{aspect: authority, status: UNKNOWN, evidence: "TODO", explanation: "TODO: does the attack require any privileged role"}}
+  - {{aspect: exclusion, status: UNKNOWN, evidence: "TODO", explanation: "TODO: does any exclusion clause apply"}}
+  - {{aspect: duplication, status: UNKNOWN, evidence: "TODO", explanation: "TODO: check index.md and prior findings; must become PASS before registering"}}
+targets: []
+'''
 
 
-def list_audit_runs(root: str) -> list:
-    d = audits_root(root)
-    if not os.path.isdir(d):
-        return []
-    return sorted(n for n in os.listdir(d)
-                  if n.startswith("run-") and os.path.isdir(os.path.join(d, n)))
-
-
-def load_audit_run(root: str):
-    """Load the newest batch's run.yaml; None when no batch exists."""
-    runs = list_audit_runs(root)
-    if not runs:
-        return None
-    run_id = runs[-1]
-    rel = f"audits/{run_id}/run.yaml"
-    data = load_yaml_file(os.path.join(audits_root(root), run_id, "run.yaml"), rel)
-    restrict_keys(data, {"run_id", "created_at", "revision", "config", "target",
-                         "steps", "history"}, rel)
-    if data.get("run_id") != run_id:
-        raise LifecycleError(f"{rel}: run_id {data.get('run_id')!r} does not match directory")
-    rev = data.get("revision")
-    if not isinstance(rev, int) or rev < 1:
-        raise LifecycleError(f"{rel}: revision must be a positive integer")
-    if rev != len(data.get("history") or []):
-        raise LifecycleError(
-            f"{rel}: consistency conflict: revision {rev} != {len(data.get('history') or [])} "
-            "history events; run `resume` and repair before any further mutation")
-    steps = as_list(data.get("steps"), f"{rel}: steps")
-    for i, st in enumerate(steps):
-        st = as_dict(st, f"{rel}: steps[{i}]")
-        as_str(st.get("skill"), f"{rel}: steps[{i}].skill")
-        check_enum(st.get("status"), ["PENDING", "COMPLETED", "FAILED", "BLOCKED"],
-                   f"{rel}: steps[{i}].status")
-        st.setdefault("attempts", [])
-    return data
-
-
-def audit_scope_files(target_root, scope, root) -> list:
-    """Manifest of files covered by the audit; batch artifacts never count."""
-    exclude = os.path.realpath(audits_root(root))
-    files = []
-
-    def excluded(p):
-        rp = os.path.realpath(p)
-        return rp == exclude or rp.startswith(exclude + os.sep)
-
-    for entry in scope or []:
-        if os.path.isdir(entry):
-            for dirpath, dirnames, filenames in os.walk(entry):
-                dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-                for f in sorted(filenames):
-                    if f.startswith("."):
-                        continue
-                    p = os.path.realpath(os.path.join(dirpath, f))
-                    if not excluded(p):
-                        files.append(p)
-        elif os.path.exists(entry) and not excluded(entry):
-            files.append(entry)
-    return sorted(set(files))
-
-
-def audit_freshness_issues(root: str, run: dict) -> list:
-    """Drift between the batch fingerprint and the current world."""
-    issues = []
-    cfg = run.get("config") or {}
-    cfg_path = cfg.get("path")
-    if isinstance(cfg_path, str) and os.path.isfile(cfg_path):
-        if sha256_file(cfg_path) != cfg.get("sha256"):
-            issues.append(f"audit config changed: {AUDIT_CONFIG_NAME} "
-                          "(start a new batch with `audit prepare --new`)")
-    target = run.get("target") or {}
-    old = {f.get("path"): f.get("sha256") for f in target.get("files") or []}
-    new = {p: sha256_file(p)
-           for p in audit_scope_files(target.get("root"), target.get("scope"), root)}
-    drifted = sorted(set(old) ^ set(new)) + sorted(
-        p for p in set(old) & set(new) if old[p] != new[p])
-    for p in drifted:
-        issues.append(f"audited target scope drifted: {p}")
-    if drifted:
-        issues.append("target content/file set changed since prepare; "
-                      "start a new batch with `audit prepare --new`")
-    for st in run.get("steps") or []:
-        p = st.get("skill")
-        expected = st.get("skill_sha256")
-        if not os.path.isfile(p):
-            if expected:
-                issues.append(f"skill entry missing: {p} "
-                              "(start a new batch with `audit prepare --new`)")
-        elif expected is None:
-            issues.append(f"skill entry now present but never fingerprinted: {p}; "
-                          "start a new batch with `audit prepare --new`")
-        elif sha256_file(p) != expected:
-            issues.append(f"skill entry changed: {p} "
-                          "(start a new batch with `audit prepare --new`)")
-    return issues
-
-
-def audit_artifact_issues(root: str, run: dict) -> list:
-    """Frozen per-step artifacts must exist and still hash correctly."""
-    issues = []
-    for st in run.get("steps") or []:
-        n = st.get("step")
-        if st.get("status") != "COMPLETED":
-            issues.append(f"step {n} is {st.get('status')}")
-            continue
-        attempts = st.get("attempts") or []
-        if not attempts:
-            issues.append(f"step {n}: COMPLETED without a recorded attempt")
-            continue
-        att = attempts[-1]
-        for key in ("report", "log"):
-            spec = att.get(key)
-            if not isinstance(spec, dict) or not spec.get("path"):
-                issues.append(f"step {n}: completed attempt has no {key} recorded")
-                continue
-            p = safe_rel(root, spec["path"], f"step {n} {key}")
-            if not os.path.isfile(p):
-                issues.append(f"step {n}: {key} missing: {spec['path']}")
-            elif sha256_file(p) != spec.get("sha256"):
-                issues.append(f"step {n}: {key} hash mismatch: {spec['path']}")
-    return issues
-
-
-def audit_progress(run: dict):
-    steps = run.get("steps") or []
-    done = [st for st in steps if st.get("status") == "COMPLETED"]
-    nxt = next((st for st in steps if st.get("status") != "COMPLETED"), None)
-    return len(done), len(steps), nxt
-
-
-def audit_steps_payload(run: dict) -> list:
-    return [{"step": st.get("step"), "skill": st.get("skill"),
-             "status": st.get("status"), "attempts": len(st.get("attempts") or [])}
-            for st in run.get("steps") or []]
-
-
-def audit_state_issues(root: str):
-    """Entry gate state: 'none' | 'incomplete' | 'complete' (+ run, issues)."""
-    has_cfg = os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME))
-    try:
-        run = load_audit_run(root)
-    except LifecycleError as exc:
-        return "incomplete", None, [f"audit batch unreadable: {exc}"]
-    try:
-        load_audit_config(root)
-    except LifecycleError as exc:
-        return "incomplete", run, [f"audit config invalid: {exc}"]
-    if run is None:
-        if not has_cfg:
-            return "none", None, []
-        return "incomplete", None, [
-            f"{AUDIT_CONFIG_NAME} exists but no batch was prepared; run `audit prepare`"]
-    issues = audit_freshness_issues(root, run) + audit_artifact_issues(root, run)
-    if issues:
-        return "incomplete", run, issues
-    return "complete", run, []
-
-
-def audit_gate(root: str):
-    """Ingest/register must wait for a fresh, complete audit batch."""
-    status, run, issues = audit_state_issues(root)
-    if status == "incomplete":
-        raise GateFailure("audit:entry", issues, [
-            "finish the audit batch (FAILED/BLOCKED steps may be rerun in original order)",
-            "if the config, target or skill entries changed: `audit prepare --new`",
-        ])
-    return run
-
-
-def audit_run_lines(root: str, run: dict) -> list:
-    done, total, nxt = audit_progress(run)
-    lines = [f"audit batch {run['run_id']}: {done}/{total} step(s) completed"]
-    for st in run.get("steps") or []:
-        if st.get("status") in ("FAILED", "BLOCKED"):
-            attempts = st.get("attempts") or []
-            note = attempts[-1].get("note", "") if attempts else ""
-            lines.append(f"  step {st.get('step')} {st.get('status')}: {note}")
-    for issue in audit_freshness_issues(root, run):
-        lines.append(f"  [stale] {issue}")
-    if nxt is not None:
-        lines.append(f"  next: execute step {nxt['step']} per {nxt['skill']} "
-                     f"(artifacts: audits/{run['run_id']}/steps/{nxt['step']}/)")
-    else:
-        lines.append("  next: `audit check` -> write audits/…/analysis.md -> "
-                     "one finding-source per root cause -> `register --from`")
-    return lines
-
-
-def audit_resume_lines(root: str) -> list:
-    has_cfg = os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME))
-    try:
-        run = load_audit_run(root)
-    except LifecycleError as exc:
-        return [f"audit batch: UNREADABLE — {exc}"]
-    if run is None and not has_cfg:
-        return []
-    if run is None:
-        return [f"{AUDIT_CONFIG_NAME} present but no batch prepared",
-                "  next: `audit prepare`"]
-    return audit_run_lines(root, run)
-
-
-def cmd_audit_prepare(a) -> int:
+def cmd_import_audit(a) -> int:
     root = require_case(a)
-    cfg, _cfg_path = load_audit_config(root)
-    with CaseLock(root):
-        current = load_audit_run(root)
-        if current is not None and not a.new:
-            issues = audit_freshness_issues(root, current)
-            if issues:
-                raise GateFailure("audit:prepare", issues, [
-                    "this batch no longer matches the config/target/skills",
-                    "start a new batch: `audit prepare --new` (old batches stay on disk)",
-                ])
-            done, total, nxt = audit_progress(current)
-            run_dir = os.path.join(audits_root(root), current["run_id"])
-            lines = [f"recovered audit batch {current['run_id']} ({done}/{total} completed)"]
-            if nxt is not None:
-                lines.append(f"  next step {nxt['step']}: {nxt['skill']} ({nxt['status']})")
-                lines.append(f"  artifacts: {os.path.join(run_dir, 'steps', str(nxt['step']))}")
-                lines.append("  after executing that skill: `audit record --step "
-                             f"{nxt['step']} --input result.yaml --expected-revision "
-                             f"{current['revision']}`")
-            else:
-                lines.append("  all steps completed; run `audit check`, write analysis.md, "
-                             "then register one finding-source per root cause")
-            emit({"lines": lines, "run_id": current["run_id"], "recovered": True,
-                  "revision": current["revision"],
-                  "steps": audit_steps_payload(current)}, a.json)
+    warn_legacy_audit_config(root)
+    m = verify_handoff(a.handoff)
+    run_id = m["run_id"]
+    manifest_path = os.path.realpath(a.handoff)
+    manifest_hash = sha256_file(manifest_path)
+    hdir = os.path.dirname(manifest_path)
+    rdir = os.path.dirname(hdir)  # audits/<run-id>/
+
+    dest_root = os.path.join(root, "imports", "audit", run_id)
+    dest_manifest = os.path.join(dest_root, "manifest.yaml")
+
+    # idempotency keyed by the finalized manifest hash; fail closed on drift
+    if os.path.isfile(dest_manifest):
+        existing = sha256_file(dest_manifest)
+        if existing == manifest_hash:
+            drafts = sorted(
+                f"ingest/{run_id}/{n}" for n in
+                (os.listdir(os.path.join(root, "ingest", run_id))
+                 if os.path.isdir(os.path.join(root, "ingest", run_id)) else []))
+            emit({"lines": [f"handoff {run_id} already imported (manifest hash matches); "
+                            "no changes"] + ([f"  draft: {d}" for d in drafts] or []),
+                  "run_id": run_id, "status": "already-imported",
+                  "drafts": drafts}, a.json)
             return EXIT_OK
+        raise LifecycleError(
+            f"imports/audit/{run_id}/manifest.yaml exists with a different hash; "
+            "previously imported audit evidence is never overwritten — investigate "
+            "or import under a new run id")
 
-        if cfg is None:
-            raise LifecycleError(
-                f"no {AUDIT_CONFIG_NAME} found in the case root; the sequential audit "
-                f"entry needs one (template: templates/{AUDIT_CONFIG_NAME})")
-        run_id = None
-        for _ in range(5):
-            candidate = ("run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-                         + "-" + uuid.uuid4().hex[:4])
-            if not os.path.exists(os.path.join(audits_root(root), candidate)):
-                run_id = candidate
-                break
-        if run_id is None:  # pragma: no cover — timestamp+uuid collision storm
-            raise LifecycleError("could not allocate a unique audit run id; retry")
-        os.makedirs(os.path.join(audits_root(root), run_id, "steps"), exist_ok=True)
-        files = [{"path": p, "sha256": sha256_file(p)}
-                 for p in audit_scope_files(cfg["target_root"], cfg["scope"], root)]
-        steps = []
-        for i, sp in enumerate(cfg["skills"], start=1):
-            os.makedirs(os.path.join(audits_root(root), run_id, "steps", str(i)),
-                        exist_ok=True)
-            st = {"step": i, "skill": sp, "skill_sha256": None,
-                  "status": "PENDING", "attempts": []}
-            if os.path.isfile(sp):
-                st["skill_sha256"] = sha256_file(sp)
-            else:
-                st["status"] = "BLOCKED"
-                st["attempts"].append({
-                    "at": now_iso(), "status": "BLOCKED",
-                    "note": f"skill entry file not found: {sp}",
-                    "report": None, "log": None})
-            steps.append(st)
-        run = {
-            "run_id": run_id,
-            "created_at": now_iso(),
-            "revision": 1,
-            "config": {"path": cfg["path"], "sha256": sha256_file(cfg["path"]),
-                       "target_root": cfg["target_root"], "scope": cfg["scope"],
-                       "skills": cfg["skills"]},
-            "target": {"root": cfg["target_root"], "scope": cfg["scope"], "files": files},
-            "steps": steps,
-            "history": [{"at": now_iso(), "event": "created",
-                         "detail": {"skills": len(steps), "scope_files": len(files)}}],
-        }
-        atomic_write(os.path.join(audits_root(root), run_id, "run.yaml"),
-                     yaml.safe_dump(run, sort_keys=False, allow_unicode=True, width=120))
-    blocked = [st["step"] for st in steps if st["status"] == "BLOCKED"]
-    lines = [f"audit batch {run_id} created: {len(steps)} skill(s), "
-             f"{len(files)} scope file(s) hashed"]
-    for st in steps:
-        lines.append(f"  step {st['step']}: {st['status']} — {st['skill']}")
-    lines.append(f"  artifacts: {os.path.join(audits_root(root), run_id, 'steps', '<N>')}")
-    lines.append("next: read step 1's SKILL.md, execute it against the scope, write "
-                 "report+log into its artifact dir, then `audit record` the result")
-    if blocked:
-        lines.append(f"NOTE: step(s) {blocked} are BLOCKED (missing SKILL.md); the batch "
-                     "cannot pass `audit check` until they are fixed via a new batch")
-    emit({"lines": lines, "run_id": run_id, "steps": audit_steps_payload(run),
-          "scope_files": [f["path"] for f in files]}, a.json)
-    return EXIT_OK
-
-
-def cmd_audit_record(a) -> int:
-    root = require_case(a)
     with CaseLock(root):
-        run = load_audit_run(root)
-        if run is None:
-            raise LifecycleError("no audit batch under audits/; run `audit prepare` first")
-        if not isinstance(a.expected_revision, int) or a.expected_revision != run["revision"]:
-            raise LifecycleError(
-                f"revision conflict: expected {a.expected_revision}, run.yaml is at "
-                f"{run['revision']}; re-read the batch and retry with the current revision")
-        issues = audit_freshness_issues(root, run)
-        if issues:
-            raise GateFailure("audit:record", issues, [
-                "this batch no longer matches the config/target/skills",
-                "start a new batch: `audit prepare --new`",
-            ])
-        steps = as_list(run["steps"], "run.yaml: steps")
-        if not (1 <= a.step <= len(steps)):
-            raise LifecycleError(f"--step out of range (1..{len(steps)})")
-        st = steps[a.step - 1]
-        if st["status"] == "COMPLETED":
-            raise LifecycleError(
-                f"step {a.step} is already COMPLETED; completed steps are not re-executed "
-                "(reruns happen in a new batch)")
-        prior = steps[:a.step - 1]
-        if not st.get("attempts"):
-            skipped = [p["step"] for p in prior if not p.get("attempts")]
-            if skipped:
-                raise LifecycleError(
-                    f"cannot record step {a.step}: earlier step(s) {skipped} have no "
-                    "execution result yet; record them first (out-of-order recording "
-                    "is rejected)")
-        else:
-            unresolved = [p["step"] for p in prior if p.get("status") != "COMPLETED"]
-            if unresolved:
-                raise LifecycleError(
-                    f"cannot retry step {a.step} yet: earlier step(s) {unresolved} are not "
-                    "COMPLETED; rerun failed/blocked items in their original order")
+        os.makedirs(os.path.join(dest_root, "candidates"), exist_ok=True)
+        os.makedirs(os.path.join(dest_root, "artifact-manifests"), exist_ok=True)
+        os.makedirs(os.path.join(dest_root, "sources"), exist_ok=True)
 
-        inp = load_yaml_file(a.input, "audit result")
-        restrict_keys(inp, {"status", "note", "report", "log"}, "audit result")
-        status = check_enum(inp.get("status"), AUDIT_RESULT_STATUSES, "audit result: status")
-        note = as_str(inp.get("note"), "audit result: note")
-        if len(note.strip()) < 20:
-            raise LifecycleError(
-                "audit result: note must be substantive (>= 20 characters): what ran, "
-                "what was covered, and why it ended in this status")
-        if status == "COMPLETED" and not st.get("skill_sha256"):
-            raise LifecycleError(
-                f"step {a.step}: cannot record COMPLETED — its skill entry was not "
-                "readable at prepare time; fix the skill path and start a new batch")
+        # immutable copies: manifest, analysis, candidates
+        shutil.copyfile(manifest_path, dest_manifest)
+        analysis = as_dict((m.get("audit") or {}).get("analysis") or {},
+                           "handoff manifest: audit.analysis")
+        shutil.copyfile(_handoff_resolve(hdir, rdir, analysis.get("path"), "analysis path"),
+                        os.path.join(dest_root, "analysis.md"))
+        for c in as_list(m.get("candidates"), "handoff manifest: candidates"):
+            src = _handoff_resolve(hdir, rdir, c.get("path"), "candidate path")
+            shutil.copyfile(src, os.path.join(dest_root, "candidates",
+                                              f"{c['id']}.yaml"))
 
-        attempt = {"at": now_iso(), "status": status, "note": note,
-                   "report": None, "log": None}
-        step_dir_rel = f"audits/{run['run_id']}/steps/{a.step}"
-        step_dir = safe_rel(root, step_dir_rel, "step artifact dir")
-        os.makedirs(step_dir, exist_ok=True)
-        seq = len(st.get("attempts") or []) + 1
-        for key in ("report", "log"):
-            src = inp.get(key)
-            if src is None:
-                if status == "COMPLETED":
-                    raise LifecycleError(
-                        f"audit result: {key} is required for COMPLETED (zero findings "
-                        "still need the real report and coverage note)")
-                continue
-            if not isinstance(src, str) or not src.strip():
-                raise LifecycleError(f"audit result: {key} must be a path")
-            expanded = os.path.expanduser(src)
-            src = os.path.realpath(expanded if os.path.isabs(expanded)
-                                   else os.path.join(root, expanded))
-            if not os.path.isfile(src):
-                raise LifecycleError(f"audit result: {key} file not found: {src}")
-            ext = os.path.splitext(src)[1] or ".md"
-            dest_rel = f"{step_dir_rel}/attempt-{seq}-{key}{ext}"
-            dest = safe_rel(root, dest_rel, "step artifact")
-            shutil.copyfile(src, dest)
-            attempt[key] = {"path": dest_rel, "sha256": sha256_file(dest)}
+        # per-step artifact manifests + every canonical artifact they bind
+        imported_reports = {}  # step -> imported primary report path (case-relative)
+        for s in as_list(m.get("steps"), "handoff manifest: steps"):
+            am = as_dict(s.get("artifact_manifest") or {}, "step artifact_manifest")
+            mp = _handoff_resolve(hdir, rdir, am.get("path"), "artifact_manifest path")
+            am_doc = load_yaml_file(mp, "artifact manifest")
+            shutil.copyfile(mp, os.path.join(dest_root, "artifact-manifests",
+                                             f"step-{s['step']}.yaml"))
+            sdir = os.path.dirname(mp)
+            for e in as_list(am_doc.get("artifacts"), "artifact manifest: artifacts"):
+                e = as_dict(e, "artifact entry")
+                src = os.path.realpath(os.path.join(sdir, e["path"]))
+                rel_in_step = e["path"]
+                dest = os.path.join(dest_root, "sources", f"step-{s['step']}",
+                                    rel_in_step)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copyfile(src, dest)
+                if e.get("id") == "primary-report":
+                    imported_reports[s["step"]] = os.path.relpath(dest, root)
 
-        st["attempts"].append(attempt)
-        st["status"] = status
-        run["history"].append({"at": now_iso(), "event": "recorded",
-                               "detail": {"step": a.step, "status": status, "attempt": seq}})
-        run["revision"] += 1
-        atomic_write(os.path.join(audits_root(root), run["run_id"], "run.yaml"),
-                     yaml.safe_dump(run, sort_keys=False, allow_unicode=True, width=120))
+    # finding-source drafts: one per candidate, provenance pre-filled,
+    # prescreen left UNKNOWN/TODO (never guessed, never auto-registered)
+    cand_docs = {}
+    for c in as_list(m.get("candidates"), "handoff manifest: candidates"):
+        cp = _handoff_resolve(hdir, rdir, c.get("path"), "candidate path")
+        cand_docs[c["id"]] = load_yaml_file(cp, "audit candidate")
+    ingest_dir = os.path.join(root, "ingest", run_id)
+    drafts = []
+    analysis_rel = os.path.relpath(os.path.join(dest_root, "analysis.md"), root)
+    for cid, doc in sorted(cand_docs.items()):
+        os.makedirs(ingest_dir, exist_ok=True)
+        files = [analysis_rel]
+        steps_used = sorted({s.get("step") for s in as_list(doc.get("sources") or [],
+                                                            "candidate sources")
+                            if isinstance(s, dict) and isinstance(s.get("step"), int)})
+        for step_no in steps_used:
+            if step_no in imported_reports:
+                files.append(imported_reports[step_no])
+        draft_rel = f"ingest/{run_id}/finding-source.{cid}.yaml"
+        draft_path = os.path.join(root, draft_rel)
+        if not os.path.exists(draft_path):
+            with open(draft_path, "w", encoding="utf-8") as f:
+                f.write(render_handoff_draft(run_id, doc, files))
+        drafts.append(draft_rel)
 
-    done, total, nxt = audit_progress(run)
-    lines = [f"recorded step {a.step} as {status} (attempt {seq}; revision {run['revision']}); "
-             f"batch {run['run_id']}: {done}/{total} completed"]
-    if nxt is not None:
-        lines.append(f"next: step {nxt['step']} — {nxt['skill']}")
-    elif done == total:
-        lines.append("all steps completed; next: `audit check`")
+    lines = [f"imported finalized audit handoff {run_id}: "
+             f"{m.get('candidate_count')} candidate(s)",
+             f"  evidence: imports/audit/{run_id}/ (independent of the audit workspace)"]
+    if drafts:
+        lines.append("next: complete every TODO in the drafts (one per candidate), "
+                     "set the duplication prescreen to PASS, then `register --from` each")
     else:
-        lines.append("every step has a first result; FAILED/BLOCKED steps must be "
-                     "resolved (original order) before `audit check` passes")
-    emit({"lines": lines, "run_id": run["run_id"], "step": a.step, "status": status,
-          "revision": run["revision"], "attempt": seq}, a.json)
-    return EXIT_OK
-
-
-def cmd_audit_check(a) -> int:
-    root = require_case(a)
-    run = load_audit_run(root)
-    if run is None:
-        if os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME)):
-            raise GateFailure("audit:check",
-                              [f"{AUDIT_CONFIG_NAME} exists but no batch was prepared"],
-                              ["run: audit prepare"])
-        raise GateFailure("audit:check",
-                          ["no audit batch and no audit config in this case root"],
-                          [f"configure {AUDIT_CONFIG_NAME} for the sequential audit entry"])
-    issues = audit_freshness_issues(root, run) + audit_artifact_issues(root, run)
-    if issues:
-        raise GateFailure("audit:check", issues, [
-            "finish every step (FAILED/BLOCKED items may be rerun in original order "
-            "after the first pass)",
-            "if the config, target or skill entries changed: `audit prepare --new`",
-        ])
-    done, total, _ = audit_progress(run)
-    emit({"lines": [f"audit batch {run['run_id']}: {done}/{total} steps completed — PASS",
-                    f"next: read all step reports, write audits/{run['run_id']}/analysis.md "
-                    "(merge duplicates by root cause), then register one finding-source "
-                    "per distinct root cause"],
-          "run_id": run["run_id"], "status": "PASS",
-          "steps": audit_steps_payload(run)}, a.json)
+        lines.append("zero candidates — analysis preserved for provenance; nothing to register")
+    emit({"lines": lines, "run_id": run_id, "status": "imported",
+          "import_root": f"imports/audit/{run_id}",
+          "candidates": sorted(cand_docs), "drafts": drafts}, a.json)
     return EXIT_OK
 
 
@@ -2415,17 +2158,15 @@ def pending_summary(doc: dict, program: dict):
 
 def cmd_resume(a) -> int:
     root = require_case(a)
+    warn_legacy_audit_config(root)
     program = load_program(root)
-    audit_lines = audit_resume_lines(root)
     fids = [a.id] if a.id else list_findings(root)
     if not fids:
-        emit({"lines": audit_lines + ["no findings registered"], "audit": audit_lines}, a.json)
+        emit({"lines": ["no findings registered"], "findings": []}, a.json)
         return EXIT_OK
     structural = 0
-    report = {"audit": audit_lines, "findings": []}
-    lines = list(audit_lines)
-    if audit_lines:
-        lines.append("")
+    report = {"findings": []}
+    lines = []
     for fid in fids:
         try:
             doc, _ = load_ledger(root, fid)
@@ -2693,32 +2434,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_ingest)
 
-    sp = sub.add_parser("audit",
-                        help="sequential audit-skill batches (config-driven entry)")
-    asp = sp.add_subparsers(dest="audit_command", required=True, metavar="audit_command")
-
-    q = asp.add_parser("prepare",
-                       help="create or recover the current audit batch")
-    q.add_argument("--case-root", required=True)
-    q.add_argument("--new", action="store_true",
-                   help="start a new batch, keeping old batches on disk")
-    q.add_argument("--json", action="store_true")
-    q.set_defaults(func=cmd_audit_prepare)
-
-    q = asp.add_parser("record", help="record one skill execution result")
-    q.add_argument("--case-root", required=True)
-    q.add_argument("--step", type=int, required=True)
-    q.add_argument("--input", required=True,
-                   help="result.yaml: {status: COMPLETED|FAILED|BLOCKED, note, report, log}")
-    q.add_argument("--expected-revision", type=int, required=True)
-    q.add_argument("--json", action="store_true")
-    q.set_defaults(func=cmd_audit_record)
-
-    q = asp.add_parser("check",
-                       help="verify the current audit batch is complete and fresh")
-    q.add_argument("--case-root", required=True)
-    q.add_argument("--json", action="store_true")
-    q.set_defaults(func=cmd_audit_check)
+    sp = sub.add_parser("import-audit",
+                        help="import a finalized audit-orchestrator handoff bundle")
+    sp.add_argument("--case-root", required=True)
+    sp.add_argument("--handoff", required=True,
+                    help="path to the finalized handoff/manifest.yaml")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_import_audit)
 
     sp = sub.add_parser("register", help="register a finding from an original source")
     sp.add_argument("--case-root", required=True)

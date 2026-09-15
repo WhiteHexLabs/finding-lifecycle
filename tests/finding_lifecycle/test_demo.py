@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unittest
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DRIVE = os.path.join(REPO, "demo", "drive.py")
 
 FOUNDARY = all(shutil.which(t) for t in ("forge", "anvil", "cast"))
