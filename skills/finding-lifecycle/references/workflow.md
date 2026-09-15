@@ -68,7 +68,12 @@ different hash fails closed), then copies immutable evidence into:
 
 After import the case is independent of the original audit workspace —
 moving or deleting it changes nothing here. The target source tree is not
-copied. One TODO draft per candidate is scaffolded at
+copied. Recommended placement: one parent directory per target program,
+the case root as `case/` beside the audit work-root `audit/` — siblings,
+never one shared root; and never point 0B `ingest --scan-dir` at a
+directory covering `audit/` (its name-based discovery would scaffold a
+duplicate draft — orchestrator output enters here via 0A only). One TODO
+draft per candidate is scaffolded at
 `ingest/<run-id>/finding-source.A-001.yaml` with provenance pre-filled
 (auditor `audit-orchestrator`, original id, audit round, imported files);
 every prescreen stays UNKNOWN/TODO — imports never register or pre-screen.

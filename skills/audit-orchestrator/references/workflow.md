@@ -30,6 +30,11 @@ against `run.yaml`). `--case-root` is a deprecated alias for `--work-root`.
             └── artifact-manifest.yaml  # manifest of the accepted COMPLETED attempt
 ```
 
+Recommended placement: one parent directory per target program, with this
+work-root as `audit/` beside the lifecycle case root `case/` — sibling
+directories, never one shared root (the work-root is disposable after
+finalize + import-audit; the case root is a long-lived ledger).
+
 ## 1. PREPARE
 
 ```bash

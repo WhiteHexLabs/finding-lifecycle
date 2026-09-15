@@ -90,6 +90,11 @@ PREPARE → EXECUTE → RECORD/NORMALIZE → CHECK → AGGREGATE → FINALIZE
 - Aggregation reads only `steps/*/artifact-manifest.yaml` and canonical
   artifacts — never the wider filesystem; deleting a skill's original
   output after `record` must not break check/aggregation/finalize.
+- One parent directory per target program: this work-root (`audit/`) sits
+  beside the lifecycle case root (`case/`) — siblings, never one shared
+  root. The work-root is disposable once `finalize` + finding-lifecycle
+  `import-audit` have copied the evidence; `prepare --new` batches
+  accumulate here while the case root stays the long-lived ledger.
 
 ## References
 

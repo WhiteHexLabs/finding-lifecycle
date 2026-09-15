@@ -87,6 +87,12 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
   scaffolded by `import-audit` pre-fill sources/auditor/audit_round and
   leave every prescreen UNKNOWN — the claim and the dedup judgment stay
   with you. `register` rejects unresolved TODO/UNKNOWN fields by design.
+- One parent directory per target program: this case root (`case/`) sits
+  beside the audit work-root (`audit/`) — siblings, never one shared root.
+  `import-audit`'s copies exist precisely so the case survives deleting
+  the audit workspace. Orchestrator output enters via 0A only — never
+  0B-scan a directory that covers `audit/` (name-based discovery would
+  scaffold a duplicate draft).
 - Run `resume` first when picking up any case; it reports blockers, invalid
   gates and rebuilds a broken index. `check` before every `advance`.
 - Modified PoC/report/targets/rules invalidate the affected gates and their

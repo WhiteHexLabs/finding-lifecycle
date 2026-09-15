@@ -25,6 +25,28 @@ Want the complete flow?
 → skills/finding-lifecycle import-audit --handoff <…>/handoff/manifest.yaml
 ```
 
+## Workspace layout (one parent per program)
+
+The audit work-root and the lifecycle case-root are **sibling directories
+under one parent per target program** — never a single shared root:
+
+```text
+<program>/
+├── audit/                        # audit-orchestrator --work-root
+│   ├── audit-skills.yaml
+│   └── audits/<run-id>/handoff/manifest.yaml
+└── case/                         # finding-lifecycle --case-root
+    ├── imports/audit/<run-id>/   # immutable copies written by import-audit
+    ├── ingest/ · findings/ · evidence/ · packages/
+```
+
+Why siblings and not one root: `import-audit` copies the evidence, so the
+case survives deleting or moving `audit/` afterwards; the work-root is
+disposable (`prepare --new` batches accumulate there) while the case root is
+the long-lived submission ledger. Orchestrator output always enters via
+`import-audit` (0A) — do not run 0B `ingest` with a `--scan-dir` that covers
+`audit/`: its name-based discovery would scaffold a duplicate draft.
+
 ## skills/audit-orchestrator
 
 Orchestrates configured local audit skills (`audit-skills.yaml`: target
