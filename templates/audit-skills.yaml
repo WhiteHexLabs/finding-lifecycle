@@ -9,10 +9,14 @@
 target_root: /absolute/path/to/protocol   # the protocol source tree to audit
 scope:                                    # non-empty list of files/dirs inside target_root
   - src
-skills: []                                # empty list = config error once this file exists
-# Fill in, IN EXECUTION ORDER — each entry points directly at a local SKILL.md
-# (no name guessing, no auto-install; duplicates and finding-lifecycle itself
-# are rejected):
-# skills:
-#   - ~/.agents/skills/example-auditor/SKILL.md
-#   - ./skills/another-auditor/SKILL.md
+# skills: executed IN THIS ORDER — each entry points directly at a local
+# SKILL.md (no name guessing, no auto-install; duplicates and
+# finding-lifecycle itself are rejected). Defaults below are the local
+# ~/.zcode/skills pipeline; edit to match your machine.
+skills:
+  - ~/.zcode/skills/x-ray/SKILL.md
+  - ~/.zcode/skills/solidity-auditor/SKILL.md
+  - ~/.zcode/skills/0xsimao-ai/SKILL.md
+  - ~/.zcode/skills/dlt-auditor/SKILL.md
+  - ~/.zcode/skills/evm-audit-master/SKILL.md
+  - ~/.zcode/skills/security-auditor/SKILL.md
