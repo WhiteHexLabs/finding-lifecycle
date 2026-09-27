@@ -1,10 +1,15 @@
 # finding-lifecycle (repository)
 
-A two-Skill collection for smart-contract security work: run the audits,
-then track each finding to a verified, privately submitted bounty report —
-with strict, hash-bound evidence contracts on both sides of the boundary.
+A three-Skill collection for smart-contract security work: assemble verified
+targets from block explorers, run the audits, then track each finding to a
+verified, privately submitted bounty report — with strict, hash-bound
+evidence contracts at every boundary.
 
 ```text
+skills/contract-fetch/       — transcribe bounty scope tables, fetch verified
+                               sources from explorers, build a compilable
+                               Foundry workspace, prove byte-identity, emit
+                               a sources-manifest
 skills/audit-orchestrator/   — run configured audit skills, freeze artifacts,
                                aggregate by root cause, emit a versioned handoff
 skills/finding-lifecycle/    — import handoffs or arbitrary audit output and
@@ -14,6 +19,10 @@ skills/finding-lifecycle/    — import handoffs or arbitrary audit output and
 ## Which skill do I need?
 
 ```text
+Need the target protocol's sources locally (pre-audit)?
+→ skills/contract-fetch (init → validate → select → fetch → assemble → build
+  → verify → manifest → check)
+
 Only want an audit?
 → skills/audit-orchestrator (prepare → record → check → aggregate → finalize)
 
@@ -21,6 +30,8 @@ Already have an audit result / finding?
 → skills/finding-lifecycle (import-audit | ingest | register → advance → submit)
 
 Want the complete flow?
+→ skills/contract-fetch (verified Foundry workspace) — use its manifest src
+  paths as the orchestrator's target_root
 → skills/audit-orchestrator → finalize
 → skills/finding-lifecycle import-audit --handoff <…>/handoff/manifest.yaml
 ```
@@ -46,6 +57,39 @@ disposable (`prepare --new` batches accumulate there) while the case root is
 the long-lived submission ledger. Orchestrator output always enters via
 `import-audit` (0A) — do not run 0B `ingest` with a `--scan-dir` that covers
 `audit/`: its name-based discovery would scaffold a duplicate draft.
+
+## skills/contract-fetch
+
+Pre-audit batch source fetching from block explorers (design doc:
+`docs/contract-fetch-design.md`). Candidates come from vulnerability-platform
+**Assets in Scope** tables — the Funds column ranks "large locked value", the
+Added-on column filters "recently added"; transcription is the operator's
+judgment, validation/ranking is the CLI's. One gated pipeline per target:
+SELECTED → FETCHED → ASSEMBLED → BUILT → VERIFIED → READY.
+
+```bash
+CF="python3 skills/contract-fetch/scripts/fetch.py"
+$CF init     --fetch-root <dir>            # scaffold + targets.yaml template
+#   transcribe scope rows (references/discovery-sources.md), then:
+$CF validate --fetch-root <dir>
+$CF select   --fetch-root <dir> --sort funds --top 20 -o targets-selected.yaml
+$CF fetch    --fetch-root <dir>            # ETHERSCAN_API_KEY from env, cache-first
+$CF assemble --fetch-root <dir>            # byte-identical trees + foundry.toml
+$CF build    --fetch-root <dir>            # FOUNDRY_PROFILE=<id> forge build
+$CF verify   --fetch-root <dir>            # on-chain bytecode + source identity
+$CF manifest --fetch-root <dir>            # sources-manifest.yaml (→ target_root)
+$CF check    --fetch-root <dir>
+```
+
+Red lines: downloaded sources are immutable evidence (never edited; BUILD_FAIL
+is recorded, not patched), fail-closed on unverified/Vyper/nightly/mismatch,
+no `--force`, API keys only from the environment. Verification proves bytecode
+equality (immutable-masked, metadata included) and per-file keccak identity —
+metadata-hash equality is what makes local line numbers identical to the
+explorer's code view.
+
+Docs: `skills/contract-fetch/references/` (discovery-sources, explorer-api,
+verification, workflow).
 
 ## skills/audit-orchestrator
 
@@ -110,13 +154,16 @@ accepted; finalize adapts frozen copies into canonical manifests). A legacy
 ## Repository layout
 
 ```text
-skills/     the two independent Skills (no runtime imports between them;
-            the file-based handoff bundle is the integration boundary)
-tests/      audit_orchestrator/ · finding_lifecycle/ · integration/
+skills/     the three independent Skills (no runtime imports between them;
+            file-based contracts are the integration boundaries:
+            sources-manifest → audit-orchestrator, handoff → finding-lifecycle)
+tests/      audit_orchestrator/ · finding_lifecycle/ · contract_fetch/ · integration/
 demo/       controlled local-chain exercise for the lifecycle pipeline
+docs/       design documents (contract-fetch-design.md)
 ```
 
-Tests: `python3 -m unittest discover -s tests` (requires PyYAML; the demo
-test skips without Foundry). Security rules on both sides: never modify the
-audited target, never fabricate evidence, no `--force`, no secrets in work
+Tests: `python3 -m unittest discover -s tests` (requires PyYAML; the demo and
+forge-build tests skip without Foundry; contract-fetch tests run fully offline
+against a mock explorer/RPC server). Security rules on all sides: never modify
+the audited target, never fabricate evidence, no `--force`, no secrets in work
 roots, no public disclosure of private bounty findings.

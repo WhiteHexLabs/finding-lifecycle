@@ -1,0 +1,27 @@
+# targets.yaml — contract-fetch target list for ONE fetch root.
+# Copy to <fetch-root>/targets.yaml (init does this) and fill it in.
+#
+# Transcribe ONE ROW PER ASSET from the vulnerability platform's
+# "Assets in Scope" table (see references/discovery-sources.md):
+#   funds_raw   the Funds cell VERBATIM ("$35.8M", "$474.3K", "$1,200,000", "N/A")
+#   address     the contract address; chain = the explorer domain of its link
+#               (etherscan.io=1, arbiscan.io=42161, basescan.org=8453, ...)
+#   added_on    the "Added on" cell, normalized to YYYY-MM-DD
+# The CLI never scrapes platform pages; it only validates and processes this file.
+schema: whitehexlabs.targets/v1
+batch_note: ""                     # free text, e.g. "Liquid Finance, Immunefi, 2026-09-27"
+rpc: {}                            # optional per-chain RPC override, e.g. {1: https://…}
+targets:
+  - id: example-target             # unique kebab-case slug
+    project: Example Protocol
+    platform: immunefi             # immunefi | c4 | sherlock | cantina | hats | hackenproof | …
+    source_url: https://immunefi.com/…   # the platform project page you transcribed from
+    chain: 1                       # Etherscan V2 chainid (whitelist in design doc §2.2)
+    address: "0x0000000000000000000000000000000000000000"
+    funds_raw: "$35.8M"            # verbatim Funds cell; funds_usd optional (cross-checked)
+    funds_usd: 35800000
+    added_on: 2026-03-30           # "Added on" cell, YYYY-MM-DD
+    description: "LiquidETH - boring_vault"   # scope-table description, verbatim
+    excluded: false                # true requires exclude_reason
+    exclude_reason: ""
+    notes: ""
