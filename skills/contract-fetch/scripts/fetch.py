@@ -689,20 +689,58 @@ def collect_imports(sources: dict) -> dict:
     return imports
 
 
-def remap_segments(imports: dict, src_root: str) -> list:
+def parse_declared_remappings(decls) -> dict:
+    """standard-json settings.remappings → {prefix: in-tree target dir}.
+
+    The deployer's own remappings are part of the verified input, so they are
+    legitimate resolution evidence — but only a mapping whose target directory
+    exists in the reconstructed tree can resolve an import (e.g. a
+    Foundry-repo payload shipping lib/ deps). Others are ignored: an import
+    they cannot satisfy stays dangling, fail-closed.
+    """
+    out = {}
+    for d in decls or []:
+        if not isinstance(d, str) or "=" not in d:
+            continue
+        prefix, target = d.split("=", 1)
+        if not prefix.endswith("/") or not target.endswith("/"):
+            continue
+        out[prefix] = normalize_source_path(target)
+    return out
+
+
+def resolve_bare_import(imp: str, src_root: str, declared: dict):
+    """Resolve a bare import in the verified tree: verbatim path first, then
+    the payload's declared remappings. Returns the in-tree relative path of
+    an existing file, or None."""
+    if os.path.isfile(os.path.join(src_root, imp)):
+        return imp
+    for prefix, target in declared.items():
+        if imp.startswith(prefix):
+            resolved = posixpath.normpath(f"{target}/{imp[len(prefix):]}")
+            if os.path.isfile(os.path.join(src_root, resolved)):
+                return resolved
+    return None
+
+
+def remap_segments(imports: dict, src_root: str, declared: dict | None = None) -> list:
+    declared = declared or {}
     segments = set()
     for found in imports.values():
         for imp in found:
             if imp.startswith("./") or imp.startswith("../"):
                 continue
             seg = imp.split("/")[0]
-            if seg and os.path.isdir(os.path.join(src_root, seg)):
+            if seg and (os.path.isdir(os.path.join(src_root, seg))
+                        or any(imp.startswith(p) for p in declared)):
                 segments.add(seg)
     return sorted(segments)
 
 
-def check_dangling(imports: dict, src_root: str, segments: list) -> list:
+def check_dangling(imports: dict, src_root: str, segments: list,
+                   declared: dict | None = None) -> list:
     segset = set(segments)
+    declared = declared or {}
     dangling = []
     for path, found in sorted(imports.items()):
         base_dir = posixpath.dirname(path)
@@ -711,12 +749,36 @@ def check_dangling(imports: dict, src_root: str, segments: list) -> list:
                 resolved = posixpath.normpath(posixpath.join(base_dir, imp))
                 ok = os.path.isfile(os.path.join(src_root, resolved))
             elif imp.split("/")[0] in segset:
-                ok = os.path.isfile(os.path.join(src_root, imp))
+                ok = resolve_bare_import(imp, src_root, declared) is not None
             else:
                 ok = os.path.isfile(os.path.join(src_root, imp))
             if not ok:
                 dangling.append(f"{path}: import {imp!r} resolves to nothing in the tree")
     return dangling
+
+
+def foundry_remappings(imports: dict, src_root: str, declared: dict, tid: str) -> list:
+    """Foundry remappings for the generated profile, relative to the batch dir.
+
+    A segment whose imports all resolve verbatim in the tree keeps the plain
+    tree mapping; a segment resolved through the payload's declared remappings
+    gets a mapping pointing at the declared target inside the tree."""
+    bare = sorted({i for found in imports.values() for i in found
+                   if not i.startswith(("./", "../")) and i.split("/")[0]})
+    out = []
+    for seg in sorted({i.split("/")[0] for i in bare}):
+        seg_imports = [i for i in bare if i.split("/")[0] == seg]
+        if os.path.isdir(os.path.join(src_root, seg)) and \
+                all(os.path.isfile(os.path.join(src_root, i)) for i in seg_imports):
+            out.append(f"{seg}/=targets/{tid}/src/{seg}/")
+            continue
+        for p, target in declared.items():
+            if any(i.startswith(p) for i in seg_imports):
+                out.append(f"{p}=targets/{tid}/src/{target}/")
+                break
+        else:
+            out.append(f"{seg}/=targets/{tid}/src/{seg}/")
+    return out
 
 
 def toml_str(value: str) -> str:
@@ -1137,8 +1199,9 @@ def cmd_assemble(a) -> int:
                                (json.dumps(gsc_doc["result"][0], indent=1) + "\n").encode("utf-8"))
 
             imports = collect_imports(parsed["sources"])
-            segments = remap_segments(imports, src_root)
-            dangling = check_dangling(imports, src_root, segments)
+            declared = parse_declared_remappings(settings.get("remappings"))
+            segments = remap_segments(imports, src_root, declared)
+            dangling = check_dangling(imports, src_root, segments, declared)
             if dangling:
                 raise TargetFailure("DANGLING_IMPORT", "; ".join(dangling[:5])
                                     + (f" (+{len(dangling) - 5} more)" if len(dangling) > 5 else ""))
@@ -1187,11 +1250,11 @@ def cmd_assemble(a) -> int:
                 with open(os.path.join(tdir, *f["path"].split("/")), encoding="utf-8") as fh:
                     sources[rel] = fh.read()
             imports = collect_imports(sources)
-            segments = remap_segments(imports, src_root)
+            declared = parse_declared_remappings(ty["compiler"].get("remappings"))
             entries.append({
                 "id": tid,
                 "compiler": ty["compiler"],
-                "remappings": [f"{seg}/=targets/{tid}/src/{seg}/" for seg in segments],
+                "remappings": foundry_remappings(imports, src_root, declared, tid),
             })
     if entries:
         atomic_write(os.path.join(bdir, "foundry.toml"), render_foundry_toml(entries))
@@ -1375,9 +1438,10 @@ def _solc_version_matches(binary: str, version: str) -> bool:
     return bool(m) and m.group(1) == version
 
 
-def solc_standard_json(binary: str, input_path: str, timeout: int) -> dict:
+def solc_standard_json(binary: str, input_path: str, timeout: int,
+                       cwd: str | None = None) -> dict:
     with open(input_path, "rb") as f:
-        proc = subprocess.run([binary, "--standard-json"], stdin=f,
+        proc = subprocess.run([binary, "--standard-json"], stdin=f, cwd=cwd,
                               capture_output=True, timeout=timeout)
     if proc.returncode != 0:
         raise FetchError(f"solc --standard-json failed: {proc.stderr.decode('utf-8', 'replace')[:500]}")
@@ -1451,7 +1515,10 @@ def cmd_verify(a) -> int:
 
             # exact-input compilation: authoritative when the solc binary exists,
             # because only it reproduces the verification-time unit paths (and
-            # therefore the metadata hash) of the on-chain bytecode
+            # therefore the metadata hash) of the on-chain bytecode.
+            # Run from the tree root: remappings declared inside the verified
+            # input resolve against the process cwd, so the tree supplies the
+            # files the deployer's own remappings point at.
             cross = {"build_cross_check": "SKIPPED",
                      "reason": "no matching solc binary found"}
             exact = None
@@ -1459,7 +1526,8 @@ def cmd_verify(a) -> int:
             if solc_bin:
                 try:
                     output = solc_standard_json(
-                        solc_bin, os.path.join(tdir, "artifacts", "input.json"), a.timeout)
+                        solc_bin, os.path.join(tdir, "artifacts", "input.json"),
+                        a.timeout, cwd=os.path.join(tdir, "src"))
                     exact = exact_input_bytecode(output, name)
                     if exact is None:
                         cross = {"build_cross_check": "SKIPPED",
