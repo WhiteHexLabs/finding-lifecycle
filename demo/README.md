@@ -32,7 +32,11 @@ Expected outcome:
 
 - finding A (`Reentrancy in VulnerableVault…`) advances
   DISCOVERED → … → SUBMITTED, including a clean-directory run of the frozen
-  package (report + vendored deps + zip + manifest);
+  package (report + `poc/` tree + vendored deps + zip + manifest). The demo
+  program declares `delivery.platform: immunefi`, so A also carries the three
+  form-field materials (`packages/<id>/immunefi/{1-title,2-description,
+  3-poc}.txt`, gate-checked for the required section headers) and `export`
+  assembles `submission/01-vault-reentrancy-drain-high/` from them;
 - finding B (`Claimed reentrancy in GuardedVault…`) closes **REFUTED** with
   fork counter-evidence (profit zero, funds intact) and an explicit conclusion
   boundary — the same attack that drains A is *completed* on B and shown to

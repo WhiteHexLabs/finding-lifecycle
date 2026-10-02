@@ -1,0 +1,36 @@
+## Brief/Intro
+
+(2-3 paragraphs for the Details field. Name the contract and its role in the
+system, state the violated invariant in one sentence, and give the trigger —
+who does what, no attacker required if none is. Anchor to the pinned block:
+how stale/live the state already is. If an amplifier variant rides the same
+root cause, fold it in here and say so.)
+
+## Vulnerability Details
+
+(The exact defect against the verified source: file, function, line-anchored
+code block, then close every escape hatch in a bullet list — each role/path
+that cannot fix or bypass the condition and why. State the broken invariant
+explicitly. Amplifier: which guard sits in which branch and what a flat or
+partial post skips.)
+
+## Impact Details
+
+(Numbered impacts, most specific first. Quote the program's in-scope impact
+wording verbatim and map to it. Quantify: loss formula, measured gas, real
+repetition bounds; USD amounts unknown at the audited layer are stated as
+unknown, never estimated. Say what ends the condition — if nothing in the
+audited system can, say so.)
+
+## References
+
+- **Target**: <address> (chain id, name; proxy -> implementation; deployment
+  kind; explorer verification) — runtime bytecode sha256 <64hex>, how it was
+  re-verified at the pinned block.
+- **Prior art consulted**: which audit channel(s) were collected and searched,
+  what keywords, why no overlap with this root cause (full copies + hashes
+  live in the case root evidence/).
+- **Known Issues** (program page): why the closest disclosure does not cover
+  this mechanism.
+- **PoC**: pinned fork block + hash + timestamp, run against the live
+  deployment; see the PoC field and the attached package.zip.

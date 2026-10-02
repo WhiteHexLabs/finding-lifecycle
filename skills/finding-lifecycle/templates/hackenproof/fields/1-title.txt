@@ -1,0 +1,6 @@
+One line, impact-first: what breaks, in which contract/function, and the
+stuck end-state — e.g. "Fast-withdrawal signature gate counts one key set and
+verifies another — empty signer set pays out with zero signatures". Paste
+into the HackenProof Title field; it is read first, no dramatization. This
+file must contain exactly that one line (this guidance is removed in the real
+material).

@@ -267,7 +267,8 @@ def main() -> int:
             "bounty": {"currency": "ETH", "ranges": "high: 5-10 ETH", "min_accepted_payout": None},
             "submission_limits": {"accounts": ["demo-account"], "counting": "per 14 days",
                                   "window": None, "max_per_window": 3, "timezone": "UTC"},
-            "delivery": {"language": "en", "fields": ["summary", "severity", "PoC", "impact"],
+            "delivery": {"platform": "immunefi",
+                         "language": "en", "fields": ["summary", "severity", "PoC", "impact"],
                          "attachments": "zip PoC package via private attachment",
                          "private_channels": ["platform private portal", "private repo"]},
             "kyc": {"required": "NOT_REQUIRED"},
@@ -298,6 +299,11 @@ def main() -> int:
             "reports": [], "checks": [],
             "no_reports_found": True,
             "no_reports_note": "docs site and program page list no audit reports for this demo program",
+            "no_reports_confirmation": {
+                "by": "demo-agent-2/session-b",
+                "at": str(date.today()),
+                "note": "independent re-search of both channels; still no audit reports",
+            },
             "conclusion": "NEW",
         })
         advance(case_root, fidA, "demo-agent",
@@ -343,9 +349,17 @@ def main() -> int:
         advance(case_root, fidA, "demo-agent",
                 f"deployment variants verified; refutations documented in evidence/{fidA}/assessment.md")
 
-        # stage 3: fork proof (real pinned-fork run)
-        shutil.copyfile(DEMO / "test" / "ExploitVault.t.sol", evA / "ExploitVault.t.sol")
-        shutil.copyfile(exploit_log, evA / "run.log")
+        # stage 3: fork proof (real pinned-fork run). The PoC lives in its own
+        # runnable project dir — re-verifiable locally (forge test) even if the
+        # finding is never submitted; packaging copies this tree verbatim.
+        pocA = evA / "poc"
+        (pocA / "test").mkdir(parents=True)
+        shutil.copyfile(DEMO / "foundry.toml", pocA / "foundry.toml")
+        shutil.copytree(DEMO / "src", pocA / "src")
+        shutil.copyfile(DEMO / "test" / "ExploitVault.t.sol", pocA / "test" / "ExploitVault.t.sol")
+        shutil.copytree(DEMO / "lib" / "forge-std", pocA / "lib" / "forge-std",
+                        ignore=shutil.ignore_patterns(".git", "out", "cache"))
+        shutil.copyfile(exploit_log, pocA / "run.log")
         wyaml(evA / "fork-proof.yaml", {
             "fork": {"chain_id": 31337, "block_number": pin, "block_hash": block_hash,
                      "rpc_url_ref": "env DEMO_RPC_URL (local anvil)",
@@ -359,8 +373,8 @@ def main() -> int:
                  "verified": "no denylist storage layout present"},
             ],
             "poc": {
-                "test_file": f"evidence/{fidA}/ExploitVault.t.sol",
-                "run_log": f"evidence/{fidA}/run.log",
+                "test_file": f"evidence/{fidA}/poc/test/ExploitVault.t.sol",
+                "run_log": f"evidence/{fidA}/poc/run.log",
                 "expected_assertions": ["ProfitWithdrawn"],
                 "result": "PASS",
             },
@@ -375,15 +389,15 @@ def main() -> int:
             },
         })
         advance(case_root, fidA, "demo-agent",
-                f"exploit reproduced on the pinned fork; assertions in evidence/{fidA}/run.log")
+                f"exploit reproduced on the pinned fork; assertions in evidence/{fidA}/poc/run.log")
 
         # stage 4: triage
         wyaml(evA / "triage.yaml", {
             "severity": {"final": "HIGH", "matrix_entry": "S2",
-                         "justification": f"net profit {SEED_ETH} ETH matches S2 (theft of deposits) per evidence/{fidA}/run.log"},
+                         "justification": f"net profit {SEED_ETH} ETH matches S2 (theft of deposits) per evidence/{fidA}/poc/run.log"},
             "eligibility": [
                 {"aspect": "scope", "rule_ref": "rules-snapshot.md#scope", "status": "PASS",
-                 "evidence": f"evidence/{fidA}/run.log", "explanation": "target in scope list"},
+                 "evidence": f"evidence/{fidA}/poc/run.log", "explanation": "target in scope list"},
                 {"aspect": "E1 privileged", "rule_ref": "rules-snapshot.md#E1", "status": "PASS",
                  "evidence": f"evidence/{fidA}/assessment.md",
                  "explanation": "attack requires no privileged role"},
@@ -399,7 +413,7 @@ def main() -> int:
             "program_snapshot": {"sha256": sha(case_root / "rules-snapshot.md")},
         })
         advance(case_root, fidA, "demo-agent",
-                f"eligibility PASS; severity justified by evidence/{fidA}/run.log amounts")
+                f"eligibility PASS; severity justified by evidence/{fidA}/poc/run.log amounts")
 
         # stage 5: package
         pkg = case_root / "packages" / fidA
@@ -422,7 +436,7 @@ def main() -> int:
               "| 2 | receiver contract with a receive() hook | yes, standard |\n\n"
               "## Attack path\n\n"
               "deposit(stake) -> withdraw() -> receive() re-enters withdraw() until the vault "
-              "balance drops below the stake; see `test/ExploitVault.t.sol`.\n\n"
+              "balance drops below the stake; see `poc/test/ExploitVault.t.sol`.\n\n"
               "## Impact\n\n"
               f"- Victim damage: {SEED_ETH} ETH seeded funds.  \n"
               f"- Attacker profit: {SEED_ETH} ETH net (stake returned); gas unknown.\n\n"
@@ -432,27 +446,24 @@ def main() -> int:
               "`ProfitWithdrawn` assertion.\n\n"
               "## Limitations\n\n"
               "Demo target on a local chain; gas costs are not modeled.\n")
-        (pkg / "test").mkdir()
-        shutil.copyfile(DEMO / "test" / "ExploitVault.t.sol", pkg / "test" / "ExploitVault.t.sol")
-        (pkg / "src").mkdir()
-        shutil.copyfile(DEMO / "src" / "Attacker.sol", pkg / "src" / "Attacker.sol")
-        shutil.copyfile(DEMO / "foundry.toml", pkg / "foundry.toml")
-        wfile(pkg / "setup_and_run.sh", f"""#!/usr/bin/env bash
+        # the frozen PoC tree rides in the package verbatim (runnable on its own)
+        shutil.copytree(evA / "poc", pkg / "poc",
+                        ignore=shutil.ignore_patterns("out", "cache"))
+        wfile(pkg / "setup_and_run.sh", """#!/usr/bin/env bash
 # Demo PoC runner: pinned toolchain; forks the demo local chain at the pinned
 # block. No downloads. Declared prerequisites: forge, RPC access.
 set -euo pipefail
-command -v forge >/dev/null 2>&1 || {{ echo "forge not found" >&2; exit 2; }}
-: "${{RPC_URL:?RPC_URL must point at the demo chain RPC}}"
-: "${{VAULT_ADDR:?VAULT_ADDR required}}"
-: "${{PIN:?PIN (fork block number) required}}"
+command -v forge >/dev/null 2>&1 || { echo "forge not found" >&2; exit 2; }
+: "${RPC_URL:?RPC_URL must point at the demo chain RPC}"
+: "${VAULT_ADDR:?VAULT_ADDR required}"
+: "${PIN:?PIN (fork block number) required}"
+cd "$(dirname "$0")/poc"
 LOG=run.log
 forge test --match-contract ExploitVaultTest --fork-url "$RPC_URL" --fork-block-number "$PIN" -vvv | tee "$LOG"
 grep -q "ProfitWithdrawn" "$LOG"
 echo "RESULT: PASS"
 """)
         os.chmod(pkg / "setup_and_run.sh", 0o755)
-        shutil.copytree(DEMO / "lib" / "forge-std", pkg / "lib" / "forge-std",
-                        ignore=shutil.ignore_patterns(".git", "out", "cache"))
 
         zpath = pkg / "package.zip"
         with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -474,11 +485,61 @@ echo "RESULT: PASS"
             raise SystemExit("clean run did not produce RESULT: PASS")
 
         files = []
-        for rel in ("report.en.md", "test/ExploitVault.t.sol", "src/Attacker.sol",
-                    "foundry.toml", "setup_and_run.sh"):
+        for rel in ("report.en.md", "poc/foundry.toml", "poc/test/ExploitVault.t.sol",
+                    "poc/src/Attacker.sol", "poc/run.log", "setup_and_run.sh"):
             files.append({"path": f"packages/{fidA}/{rel}", "sha256": sha(pkg / rel),
                           "purpose": "final-report" if rel.startswith("report") else
-                                     ("poc-test" if rel.startswith("test/") else "package-file")})
+                                     ("poc-test" if rel.startswith("poc/test/") else "package-file")})
+
+        # platform materials (Immunefi three-file format) beside the zip
+        say("writing immunefi form-field materials")
+        imm = pkg / "immunefi"
+        exploit_log_text = Path(exploit_log).read_text(encoding="utf-8", errors="ignore").strip()
+        m_title = wfile(imm / "1-title.txt",
+                        "Reentrancy in VulnerableVault.withdraw lets any depositor drain all "
+                        "seeded deposits before the balance is cleared\n")
+        m_desc = wfile(imm / "2-description.txt",
+                       "## Brief/Intro\n\n"
+                       f"VulnerableVault at {vault} (demo local chain 31337) holds the seeded "
+                       f"{SEED_ETH} ETH of victim deposits. `withdraw()` pays before it zeroes "
+                       "the balance, so one reentrant receiver drains the vault with a "
+                       f"{STAKE_ETH} ETH stake and no privileged access.\n\n"
+                       "## Vulnerability Details\n\n"
+                       "`withdraw()` sends ETH via `msg.sender.call` before setting "
+                       "`balances[msg.sender] = 0`; the stale balance is withdrawn repeatedly "
+                       "until the vault is empty (see the PoC field and the attached "
+                       "package.zip).\n\n"
+                       "## Impact Details\n\n"
+                       f"- Victim damage: {SEED_ETH} ETH seeded funds fully drained.\n"
+                       f"- Attacker profit: {SEED_ETH} ETH net (stake returned); gas unknown.\n"
+                       "- Scope of victims: all depositors of this deployment.\n\n"
+                       "## References\n\n"
+                       f"- **Target**: {vault} (chain 31337), runtime code hash recorded in "
+                       f"evidence/{fidA}/cross-check.yaml.\n"
+                       f"- **Pinned block**: {pin} ({block_hash}); PoC and verbatim output in "
+                       "the PoC field; runnable package attached as package.zip.\n")
+        m_poc = wfile(imm / "3-poc.txt",
+                      f"Foundry, fork of the demo local chain pinned to block {pin} "
+                      f"(hash {block_hash}), executed against the deployed "
+                      f"VulnerableVault at {vault}. Every assertion names itself in the log.\n\n"
+                      "### Threat modeled\n\n"
+                      "A plain depositor with a receiver contract; no cheatcode powers, no "
+                      "privileged roles, no key possession.\n\n"
+                      "### Reproduce\n\n"
+                      "The attached package.zip contains the full runnable environment "
+                      "(setup_and_run.sh, poc/ project, vendored forge-std):\n\n"
+                      "```bash\n"
+                      "export RPC_URL=<demo chain RPC> VAULT_ADDR=<vault> PIN=<block>\n"
+                      "unzip package.zip && cd <package-dir> && bash setup_and_run.sh\n"
+                      "```\n\n"
+                      "### Expected output\n\n"
+                      "```\n" + exploit_log_text + "\n```\n\n"
+                      "### What the test proves\n\n"
+                      f"1. The vault balance drops from {SEED_ETH + STAKE_ETH} ETH to the "
+                      "attacker stake: the full seed is extracted (ProfitWithdrawn).\n"
+                      "2. The drain completes in one transaction with a permissionless "
+                      "depositor; nothing beyond the documented actors is assumed.\n")
+
         # the zip holds the package payload; manifest.yaml (with the zip hash)
         # stays outside it — that is how the PACKAGED gate verifies integrity
         wyaml(pkg / "manifest.yaml", {
@@ -497,6 +558,14 @@ echo "RESULT: PASS"
                          "pattern_id": "privkey_hex",
                          "reason": "false positive: the 0x-prefixed 64-hex string is the pinned "
                                    "block hash quoted in the report header, not a private key"},
+                        {"file": f"packages/{fidA}/immunefi/2-description.txt",
+                         "pattern_id": "privkey_hex",
+                         "reason": "false positive: pinned block hash quoted in References, "
+                                   "not a private key"},
+                        {"file": f"packages/{fidA}/immunefi/3-poc.txt",
+                         "pattern_id": "privkey_hex",
+                         "reason": "false positive: pinned block hash quoted in the fork "
+                                   "pinning paragraph, not a private key"},
                     ],
                 },
                 "dependencies": {
@@ -505,6 +574,18 @@ echo "RESULT: PASS"
                     "external_prereqs": [f"forge {forge_version}", "demo chain RPC access"],
                 },
                 "self_contained": True,
+            },
+            "materials": {
+                "platform": "immunefi",
+                "slug": "vault-reentrancy-drain",
+                "fields": [
+                    {"field": "title",
+                     "path": f"packages/{fidA}/immunefi/1-title.txt", "sha256": sha(m_title)},
+                    {"field": "description",
+                     "path": f"packages/{fidA}/immunefi/2-description.txt", "sha256": sha(m_desc)},
+                    {"field": "poc",
+                     "path": f"packages/{fidA}/immunefi/3-poc.txt", "sha256": sha(m_poc)},
+                ],
             },
         })
         advance(case_root, fidA, "demo-agent",
@@ -531,7 +612,14 @@ echo "RESULT: PASS"
         advance(case_root, fidA, "demo-reviewer",
                 f"independent rerun bound to package hash; log evidence/{fidA}/self-rerun.log")
 
-        # stage 7: submission receipt + advance
+        # stage 7: assemble submission materials, then record the receipt + advance
+        say("exporting immunefi submission materials")
+        lc(case_root, "export", "--id", fidA)
+        sub_dir = case_root / "submission" / "01-vault-reentrancy-drain-high"
+        for f_ in ("1-title.txt", "2-description.txt", "3-poc.txt", "package.zip"):
+            if not (sub_dir / f_).is_file():
+                raise SystemExit(f"export missing {sub_dir / f_}")
+
         receipt = wfile(evA / "receipt.txt",
                         f"platform ack for DEMO-1001, submitted {date.today()} via private portal\n")
         wyaml(evA / "submission.yaml", {
@@ -569,6 +657,11 @@ echo "RESULT: PASS"
             "reports": [], "checks": [],
             "no_reports_found": True,
             "no_reports_note": "no published audits for the demo program",
+            "no_reports_confirmation": {
+                "by": "demo-agent-2/session-b",
+                "at": str(date.today()),
+                "note": "independent re-search of both channels; still no audit reports",
+            },
             "conclusion": "NEW",
         })
         advance(case_root, fidB, "demo-agent",

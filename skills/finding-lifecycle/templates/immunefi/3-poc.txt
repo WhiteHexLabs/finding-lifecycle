@@ -1,0 +1,47 @@
+(Opening paragraph for the PoC field, before the first header: tool + chain,
+fork pinning — block number, block hash, timestamp — executed against the
+live deployment <address> (runtime bytecode sha256 <64hex>). State the live
+values the test asserts at the pin. One sentence on fidelity: no source
+contract modified, every assertion names itself in the log.)
+
+### Threat modeled
+
+(Who the actors are and what real powers they hold. "No attacker at all" is a
+valid answer — then name the honest actors whose documented job triggers the
+condition. Justify every cheatcode the same way: vm.prank voices real on-chain
+roles read from the fork; no key is possessed; no power beyond the documented
+actors is granted. deal only writes balances the participant already holds, or
+state explicitly marked as test-only preparation.)
+
+### Reproduce
+
+(The attached package.zip (private attachment) contains the full runnable
+environment: setup_and_run.sh, the PoC test, the explorer-verified source
+tree, vendored pinned dependencies, run.log.)
+
+```bash
+export <PROVIDER>_API_KEY=<key>   # archive RPC to hit the pin exactly; any
+                                  # endpoint serving state at block <N> works
+unzip package.zip && cd <package-dir> && bash setup_and_run.sh
+# -- or, inside the prepared project: --
+# forge test --match-contract <ExactContractName> -vv
+```
+
+(If the environment is additionally hosted somewhere, that channel must
+satisfy the private-channel rule — platform-private attachment or a private
+repo; never a public or unlisted gist. Record it in submission.yaml.)
+
+### Expected output (N/N PASS)
+
+```
+(Verbatim output of the pinned evidence run: every [PASS] line with its named
+assertion and gas, the logged fork state values, and the suite-result line.)
+```
+
+### What the test proves
+
+(Numbered points, one per load-bearing claim: which posting/call paths were
+exercised against the real contract (none simulated around), why the block is
+structural rather than key-related, what each named assertion pinned — value
+unchanged / timestamp re-stamped / state asserted after the revert. Anything
+the test does NOT prove stays in the report's Limitations section.)

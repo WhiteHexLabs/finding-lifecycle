@@ -76,7 +76,7 @@ ALLOWED_FM_KEYS = {
     "stage", "disposition", "revision",
     "sources", "targets", "root_cause", "duplicate_of", "refutation",
     "severity", "program_snapshot", "prior_art",
-    "evidence", "gates", "blockers",
+    "evidence", "gates", "blockers", "corrections",
     "submission", "appeal", "history",
 }
 
@@ -118,15 +118,20 @@ STAGE_HINTS = {
         "write one English report per root cause; assemble the self-contained PoC package",
         "run the package in a clean directory; save the log containing RESULT: PASS",
         "run the secrets scan; pin dependencies; write packages/{fid}/manifest.yaml",
+        "if program.yaml delivery.platform names a material platform (immunefi, "
+        "hackenproof): write packages/{fid}/<platform>/ form-field files "
+        "(templates/immunefi/, templates/hackenproof/) and declare them in the "
+        "manifest materials block",
     ],
     "SELF_REVIEWED": [
-        "have an independent session/agent rerun from the frozen package",
-        "verify amounts, preconditions and wording; record adverse facts",
-        "write evidence/{fid}/self-review.yaml bound to the final package hash",
+        "run independent review rounds until one raises zero required changes (workflow section 6)",
+        "each later round starts by landing-verifying the previous round's fixes, then lifecycle.py lint",
+        "write evidence/{fid}/self-review.yaml (rounds[] plus final checks) bound to the final package hash",
     ],
     "SUBMITTED": [
         "re-check rules and channel privacy; verify account limits and KYC status",
-        "submit manually through the private channel; keep the receipt",
+        "assemble the submission dir (lifecycle.py export --id … in priority order) and paste "
+        "the form-field materials through the private channel; keep the receipt",
         "lifecycle.py record submission --input evidence/{fid}/submission.yaml",
     ],
 }
@@ -137,6 +142,78 @@ SECRET_PATTERNS = [
     ("pem_block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("mnemonic_marker", re.compile(r"(?i)(seed|mnemonic)[ _]phrase")),
 ]
+
+# Submission platforms with a fixed form-field material format. When
+# program.yaml `delivery.platform` names one of these, the PACKAGED gate
+# requires the per-finding form-field files and `export` assembles them.
+# Each spec maps materials.fields[].field -> canonical path relative to
+# packages/<id>/<platform>/, plus the mechanical content anchors (required
+# section headers; `upload_line` = must carry an "Upload: <file>" line naming
+# the attached bundle). `zip_name` is the exported attachment filename
+# ("{slug}" expands to materials.slug).
+MATERIAL_SPECS = {
+    # Immunefi three-file format (Aera/DAWN layout): one txt per web-form
+    # field, pasted manually.
+    "immunefi": {
+        "zip_name": "package.zip",
+        "fields": {
+            "title": {"path": "1-title.txt"},
+            "description": {"path": "2-description.txt", "headers": [
+                "## Brief/Intro", "## Vulnerability Details",
+                "## Impact Details", "## References"]},
+            "poc": {"path": "3-poc.txt", "headers": [
+                "### Threat modeled", "### Reproduce",
+                "### Expected output", "### What the test proves"]},
+        },
+    },
+    # HackenProof submission layout: four web-form fields under fields/ plus
+    # the standalone full write-up; the supporting-files field names the
+    # uploaded bundle zip.
+    "hackenproof": {
+        "zip_name": "{slug}-poc-bundle.zip",
+        "fields": {
+            "title": {"path": "fields/1-title.txt"},
+            "vulnerability_details": {"path": "fields/2-vulnerability-details.md", "headers": [
+                "**Severity.**", "## Root cause", "## Precondition",
+                "## PoC", "## Impact", "## Fix"]},
+            "validation_steps": {"path": "fields/3-validation-steps.md", "headers": [
+                "## How to run", "## Expected output",
+                "## What each test proves"]},
+            "supporting_files": {"path": "fields/4-supporting-files.txt",
+                                 "upload_line": True},
+            "submission": {"path": "submission.md", "headers": ["## Reproduction"]},
+        },
+    },
+}
+MATERIAL_PLATFORMS = set(MATERIAL_SPECS)
+
+# Per-platform field map for the export README index.
+EXPORT_README_FIELDS = {
+    "immunefi": [
+        "- `1-title.txt` — paste into the Title field",
+        "- `2-description.txt` — paste into the Details field "
+        "(`## Brief/Intro`, `## Vulnerability Details`, `## Impact Details`, `## References`)",
+        "- `3-poc.txt` — paste into the PoC field "
+        "(`### Threat modeled`, `### Reproduce`, `### Expected output`, `### What the test proves`)",
+        "- `package.zip` — the private attachment (hash recorded per package below)",
+    ],
+    "hackenproof": [
+        "- `fields/1-title.txt` — paste into the Title field (one impact-first line)",
+        "- `fields/2-vulnerability-details.md` — paste into the Vulnerability details field "
+        "(`**Severity.**` lead, then `## Root cause`, `## Precondition`, `## PoC`, "
+        "`## Impact`, `## Fix`)",
+        "- `fields/3-validation-steps.md` — paste into the Validation steps field "
+        "(`## How to run`, `## Expected output`, `## What each test proves`)",
+        "- `fields/4-supporting-files.txt` — paste into the Supporting files field "
+        "(its `Upload:` line names the bundle below)",
+        "- `submission.md` — the full standalone write-up (the details field plus "
+        "`## Reproduction`)",
+        "- `<slug>-poc-bundle.zip` — the uploaded bundle (self-contained Foundry PoC "
+        "project; hash recorded per package below)",
+    ],
+}
+UPLOAD_LINE_RE = re.compile(r"(?m)^Upload: \S")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}[a-z0-9]$")
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +476,13 @@ def validate_program(prog: dict) -> dict:
 
     as_list(prog.get("exclusions"), "program.yaml: exclusions")
     as_list(prog.get("novelty_sources"), "program.yaml: novelty_sources")
+
+    delivery = prog.get("delivery")
+    if delivery is not None:
+        delivery = as_dict(delivery, "program.yaml: delivery")
+        if delivery.get("platform") is not None:
+            check_enum(delivery["platform"], MATERIAL_PLATFORMS | {"other"},
+                       "program.yaml: delivery.platform")
     return prog
 
 
@@ -410,6 +494,14 @@ def load_program(root: str) -> dict:
 
 def program_matrix_levels(prog: dict) -> dict:
     return {e["id"]: e["level"] for e in prog.get("severity_matrix", [])}
+
+
+def program_platform(prog: dict):
+    """delivery.platform when set (e.g. 'immunefi'), else None."""
+    delivery = prog.get("delivery")
+    if not isinstance(delivery, dict):
+        return None
+    return delivery.get("platform") or None
 
 
 # ---------------------------------------------------------------------------
@@ -684,7 +776,8 @@ def verify_prior_art(ctx: Ctx, inp: dict) -> None:
     only allowed with an explicit still_eligible rule reference.
     """
     restrict_keys(inp, {"discovery", "reports", "checks",
-                        "no_reports_found", "no_reports_note", "conclusion"},
+                        "no_reports_found", "no_reports_note",
+                        "no_reports_confirmation", "conclusion"},
                   "prior-art.yaml")
 
     discovery = as_list(inp.get("discovery") or [], "prior-art.yaml: discovery")
@@ -709,6 +802,25 @@ def verify_prior_art(ctx: Ctx, inp: dict) -> None:
         elif not isinstance(note, str) or not note.strip():
             ctx.issue("incomplete", "prior-art.yaml: no_reports_found requires no_reports_note "
                                     "(which channels were checked and what was found)")
+        else:
+            # absence is the highest-stakes judgment in this gate: a missed
+            # report can void a submission. Require two distinct discovery
+            # channels AND an independent confirmation of the empty result.
+            kinds = {d.get("kind") for d in discovery if isinstance(d, dict)}
+            if len(kinds) < 2:
+                ctx.issue("incomplete", "prior-art.yaml: no_reports_found needs >=2 distinct "
+                                        "discovery channels (e.g. docs_site + program_page); "
+                                        f"got {sorted(str(k) for k in kinds)}")
+            conf = inp.get("no_reports_confirmation")
+            if not isinstance(conf, dict):
+                ctx.issue("incomplete", "prior-art.yaml: no_reports_found requires "
+                                        "no_reports_confirmation {by, at, note} — an independent "
+                                        "re-search before the gate passes; without it, record a blocker")
+            else:
+                conf = as_dict(conf, "prior-art.yaml: no_reports_confirmation")
+                as_str(conf.get("by"), "prior-art.yaml: no_reports_confirmation.by (independent identity)")
+                as_str(conf.get("at"), "prior-art.yaml: no_reports_confirmation.at (ISO date)")
+                as_str(conf.get("note"), "prior-art.yaml: no_reports_confirmation.note")
 
     norm_reports = []
     for i, r in enumerate(reports):
@@ -1024,7 +1136,7 @@ def scan_secrets(paths, root):
 
 
 def verify_package(ctx: Ctx, inp: dict, manifest_rel: str) -> None:
-    restrict_keys(inp, {"package"}, f"{manifest_rel}")
+    restrict_keys(inp, {"package", "materials"}, f"{manifest_rel}")
     pkg = as_dict(inp.get("package") or {}, f"{manifest_rel}: package")
     fid = ctx.doc["id"]
 
@@ -1076,6 +1188,8 @@ def verify_package(ctx: Ctx, inp: dict, manifest_rel: str) -> None:
                 ctx.issue("incomplete", f"package zip does not contain {member} (for {rel})")
     ctx.add_path(zip_rel, "package-zip", "stage:PACKAGED")
 
+    material_rels = verify_materials(ctx, manifest_rel, inp.get("materials"))
+
     clean = as_dict(pkg.get("clean_run") or {}, f"{manifest_rel}: package.clean_run")
     as_str(clean.get("performed_in"), f"{manifest_rel}: package.clean_run.performed_in (where the clean run happened)")
     log_rel = as_str(clean.get("log_path"), f"{manifest_rel}: package.clean_run.log_path")
@@ -1088,7 +1202,7 @@ def verify_package(ctx: Ctx, inp: dict, manifest_rel: str) -> None:
             if "RESULT: PASS" not in f.read():
                 ctx.issue("incomplete", f"clean run log lacks the 'RESULT: PASS' marker: {log_rel}")
 
-    flagged = scan_secrets(rels, ctx.root)
+    flagged = scan_secrets(rels + material_rels, ctx.root)
     scan = as_dict(pkg.get("secrets_scan") or {}, f"{manifest_rel}: package.secrets_scan")
     exceptions = as_list(scan.get("exceptions") or [], f"{manifest_rel}: package.secrets_scan.exceptions")
     exc_keys = set()
@@ -1118,13 +1232,174 @@ def verify_package(ctx: Ctx, inp: dict, manifest_rel: str) -> None:
     ctx.add_path(manifest_rel, "package-manifest", "stage:PACKAGED")
 
 
+def verify_materials(ctx: Ctx, manifest_rel: str, materials) -> list:
+    """Platform form-field materials declared in the package manifest.
+
+    Immunefi layout: packages/<id>/immunefi/{1-title,2-description,3-poc}.txt.
+    HackenProof layout: packages/<id>/hackenproof/fields/{1-title.txt,
+    2-vulnerability-details.md, 3-validation-steps.md, 4-supporting-files.txt}
+    plus submission.md (the full write-up with its Reproduction section).
+    Pasted/uploaded at submission time. The files live beside package.zip
+    (not inside it). Returns the material paths for the secrets scan.
+    Mechanical checks only — content judgement stays with the reviewer.
+    """
+    plat = program_platform(ctx.program)
+    spec = MATERIAL_SPECS.get(plat)
+    if materials is None:
+        if spec:
+            expected = ", ".join(f"{plat}/{fspec['path']}"
+                                 for fspec in spec["fields"].values())
+            ctx.issue("incomplete",
+                      f"{manifest_rel}: materials missing — program.yaml delivery.platform is "
+                      f"{plat!r}; the package must carry the form-field files ({expected}) "
+                      "plus a materials block declaring their hashes)")
+        return []
+    materials = as_dict(materials, f"{manifest_rel}: materials")
+    restrict_keys(materials, {"platform", "slug", "fields", "form_targets",
+                              "attachments"}, f"{manifest_rel}: materials")
+    mplat = check_enum(materials.get("platform"), MATERIAL_PLATFORMS,
+                       f"{manifest_rel}: materials.platform")
+    if plat != mplat:
+        ctx.issue("invalid",
+                  f"{manifest_rel}: materials.platform {mplat!r} does not match program.yaml "
+                  f"delivery.platform {plat!r}")
+    slug = as_str(materials.get("slug"), f"{manifest_rel}: materials.slug")
+    if not SLUG_RE.fullmatch(slug):
+        ctx.issue("incomplete",
+                  f"{manifest_rel}: materials.slug must be a short lowercase hyphen slug "
+                  f"(2-41 chars, [a-z0-9-]), got {slug!r} — it names the export directory")
+    spec = MATERIAL_SPECS[mplat]
+    pkg_dir = os.path.dirname(manifest_rel)
+
+    fields = as_list(materials.get("fields") or [], f"{manifest_rel}: materials.fields")
+    rels = []
+    seen = []
+    for i, f_ in enumerate(fields):
+        f_ = as_dict(f_, f"{manifest_rel}: materials.fields[{i}]")
+        name = check_enum(f_.get("field"), set(spec["fields"]),
+                          f"{manifest_rel}: materials.fields[{i}].field")
+        if name in seen:
+            ctx.issue("incomplete", f"{manifest_rel}: materials field {name!r} declared twice")
+        seen.append(name)
+        rel = as_str(f_.get("path"), f"{manifest_rel}: materials.fields[{i}].path")
+        expected = f_.get("sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise LifecycleError(f"{manifest_rel}: materials.fields[{i}].sha256 must be a 64-hex digest")
+        ctx.verify_file_hash(rel, expected, f"material {name}")
+        ctx.add_path(rel, f"material:{name}", "stage:PACKAGED")
+        rels.append(rel)
+        canonical = f"{pkg_dir}/{mplat}/{spec['fields'][name]['path']}"
+        if rel != canonical:
+            ctx.issue("incomplete",
+                      f"{manifest_rel}: materials field {name!r} must be the {canonical} file, got {rel}")
+    missing = [n for n in spec["fields"] if n not in seen]
+    if missing:
+        ctx.issue("incomplete",
+                  f"{manifest_rel}: materials must declare exactly these fields: "
+                  f"{', '.join(spec['fields'])} (missing: {', '.join(missing)})")
+
+    for rel, name in zip(rels, seen):
+        p = safe_rel(ctx.root, rel, f"material {name}")
+        if not os.path.isfile(p):
+            continue
+        with open(p, encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        if not text.strip():
+            ctx.issue("incomplete", f"material {name} is empty: {rel}")
+        for header in spec["fields"][name].get("headers", ()):
+            if header not in text:
+                ctx.issue("incomplete",
+                          f"material {name} ({rel}) lacks the required section header {header!r}")
+        if spec["fields"][name].get("upload_line") \
+                and not UPLOAD_LINE_RE.search(text):
+            ctx.issue("incomplete",
+                      f"material {name} ({rel}) must name the uploaded bundle in an "
+                      "'Upload: <file>' line")
+
+    # which contract to pick in each platform form field (dropdown answers,
+    # verified against an authoritative source; surfaced by export)
+    for i, ft in enumerate(as_list(materials.get("form_targets") or [],
+                                   f"{manifest_rel}: materials.form_targets")):
+        ft = as_dict(ft, f"{manifest_rel}: materials.form_targets[{i}]")
+        as_str(ft.get("field"), f"{manifest_rel}: materials.form_targets[{i}].field "
+                                "(the platform form field/dropdown name)")
+        check_addr(ft.get("address"), f"{manifest_rel}: materials.form_targets[{i}].address")
+        as_str(ft.get("source"), f"{manifest_rel}: materials.form_targets[{i}].source "
+                                 "(where the address was verified, e.g. provenance + registry read)")
+
+    # files uploaded beside the bundle zip (extend the lint attachment set;
+    # copied into the export directory)
+    for i, at in enumerate(as_list(materials.get("attachments") or [],
+                                   f"{manifest_rel}: materials.attachments")):
+        at = as_dict(at, f"{manifest_rel}: materials.attachments[{i}]")
+        rel = as_str(at.get("path"), f"{manifest_rel}: materials.attachments[{i}].path")
+        expected = at.get("sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise LifecycleError(f"{manifest_rel}: materials.attachments[{i}].sha256 must be a 64-hex digest")
+        ctx.verify_file_hash(rel, expected, f"material attachment {rel}")
+        ctx.add_path(rel, f"material-attachment:{os.path.basename(rel)}", "stage:PACKAGED")
+        rels.append(rel)
+        at.setdefault("note", "")
+
+    return rels
+
+
 def verify_self_review(ctx: Ctx, inp: dict) -> None:
     restrict_keys(inp, {"reviewer", "package_sha256", "checks",
-                        "adverse_facts", "unresolved_objections"}, "self-review.yaml")
+                        "adverse_facts", "unresolved_objections", "rounds"},
+                  "self-review.yaml")
     reviewer = as_dict(inp.get("reviewer") or {}, "self-review.yaml: reviewer")
     as_str(reviewer.get("identity"), "self-review.yaml: reviewer.identity")
     check_enum(reviewer.get("kind"), {"independent_session", "independent_agent"},
                "self-review.yaml: reviewer.kind")
+
+    # multi-round loop (workflow section 6). A flat legacy self-review with no
+    # rounds[] key stays valid as an implicit single round.
+    rounds = inp.get("rounds")
+    if rounds is not None:
+        rounds = as_list(rounds, "self-review.yaml: rounds")
+        if not rounds:
+            ctx.issue("incomplete", "self-review.yaml: rounds present but empty — record at least one round")
+        for i, r in enumerate(rounds):
+            r = as_dict(r, f"self-review.yaml: rounds[{i}]")
+            if r.get("round") != i + 1:
+                ctx.issue("incomplete", f"self-review.yaml: rounds[{i}].round must be {i + 1} "
+                                        "(1-based, consecutive)")
+            landing = as_dict(r.get("landing_check") or {},
+                              f"self-review.yaml: rounds[{i}].landing_check")
+            result = check_enum(landing.get("result"), {"PASS", "N_A", "FAIL"},
+                                f"self-review.yaml: rounds[{i}].landing_check.result")
+            if result == "FAIL":
+                ctx.issue("incomplete", f"self-review.yaml: rounds[{i}].landing_check FAIL — "
+                                        "the previous round's fixes did not land; loop again")
+            if i == 0:
+                if result != "N_A":
+                    ctx.issue("incomplete", "self-review.yaml: rounds[0].landing_check must be N_A "
+                                            "(nothing to verify before round 1)")
+            elif result != "PASS" or landing.get("of_round") != i:
+                ctx.issue("incomplete", f"self-review.yaml: rounds[{i}] must landing-verify "
+                                        f"round {i} with result PASS")
+            for j, o in enumerate(as_list(r.get("objections") or [],
+                                          f"self-review.yaml: rounds[{i}].objections")):
+                o = as_dict(o, f"self-review.yaml: rounds[{i}].objections[{j}]")
+                as_str(o.get("id"), f"self-review.yaml: rounds[{i}].objections[{j}].id")
+                verdict = check_enum(o.get("verdict"), {"fixed", "kept_with_rationale"},
+                                     f"self-review.yaml: rounds[{i}].objections[{j}].verdict")
+                note = o.get("note")
+                if verdict == "kept_with_rationale" and (not isinstance(note, str) or not note.strip()):
+                    ctx.issue("incomplete", f"self-review.yaml: rounds[{i}].objections[{j}] is "
+                                            "kept_with_rationale and must carry a note")
+            if not isinstance(r.get("clean_round"), bool):
+                ctx.issue("incomplete", f"self-review.yaml: rounds[{i}].clean_round must be a boolean")
+        if rounds:
+            last = rounds[-1]
+            if last.get("clean_round") is not True:
+                ctx.issue("incomplete", "self-review.yaml: the final round must be clean_round: true — "
+                                        "run more rounds until one raises zero required changes")
+            elif any(isinstance(o, dict) and o.get("verdict") == "fixed"
+                     for o in (last.get("objections") or [])):
+                ctx.issue("incomplete", "self-review.yaml: final round declares fixes AND clean_round — "
+                                        "fixes need a landing-verification round after them")
 
     zip_info = current_zip(ctx)
     declared = norm_digest(inp.get("package_sha256"), "self-review.yaml: package_sha256")
@@ -1201,6 +1476,261 @@ VERIFIERS = {
     "FORK_PROVEN": verify_fork_proof,
     "TRIAGED": verify_triage,
 }
+
+
+# ---------------------------------------------------------------------------
+# material lint — the fix-batch regression battery (contracts section 9)
+#
+# Review rounds and polish edits are themselves a defect source: rewrites have
+# deleted PoC run instructions out of a validation field, injected review
+# narration into reports and pointed supporting-files fields at local-only
+# artifacts. lint re-checks the mechanical classes after EVERY edit batch.
+
+LINT_ADDR_TEXT_RE = re.compile(r"(?<![0-9A-Za-z])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])")
+LINT_URL_RE = re.compile(r"https?://\S+")
+LINT_FILE_RE = re.compile(
+    r"(?<![\w/.-])(?:\./)?(?:[\w][\w.-]*/)*[\w][\w.-]*"
+    r"\.(?:txt|md|log|json|pdf|zip|sh|toml|ya?ml|sol|ts|js)(?![\w-])")
+
+VOICE_PATTERNS = [
+    ("internal-finding-id", re.compile(r"\bF-[0-9a-f]{32}\b")),
+    ("review-narration", re.compile(r"(?i)\b(?:this|our|the)\s+review\b")),
+    ("review-narration", re.compile(r"(?i)\b(?:previous|prior|review)\s+rounds?\b")),
+    ("review-narration", re.compile(r"(?i)\bpost[- ]review\b")),
+    ("correction-narration", re.compile(r"(?i)\bcorrected\b|\bsynchronized\b")),
+    ("internal-process", re.compile(r"(?i)\bde-?AI\b|\binternal\s+(?:numbering|review|notes?)\b")),
+    ("workspace-phrasing", re.compile(r"(?i)\b(?:workspace|workdir|local[- ]only)\b")),
+    ("reviewer-meta", re.compile(r"(?i)\bindependent\s+(?:session|agent|reviewer)\b")),
+]
+
+UNIVERSAL_PATTERNS = [
+    ("prior-art-negation", re.compile(
+        r"(?i)\bnot\s+(?:been\s+)?(?:identified|covered|reported|mentioned|disclosed|found|addressed)"
+        r"\s+in\s+(?:any|all|four|three|both|the\s+\w+)")),
+    ("no-audit-claim", re.compile(
+        r"(?i)\bno\s+(?:published|prior|previous|known)?\s*(?:audit|report)s?"
+        r"\s+(?:found|mention|cover|discuss|address)\b")),
+    ("never-claim", re.compile(r"(?i)\bnever\s+(?:happened|occurred|been|executed|triggered|called|used)\b")),
+    ("all-production", re.compile(r"(?i)\b(?:in|across)\s+all\s+(?:production|observed|recorded|historic)")),
+    ("every-subject", re.compile(
+        r"(?i)\bevery\s+(?:user|exit|redemption|transaction|deposit|withdrawal|call|invocation)")),
+]
+
+LINT_CHECK_IDS = {"addr", "attachment", "sections", "voice", "universal"}
+
+
+def load_lint_allowlist(root: str) -> list:
+    path = os.path.join(root, "lint-allowlist.yaml")
+    if not os.path.isfile(path):
+        return []
+    doc = load_yaml_file(path, "lint-allowlist.yaml")
+    entries = []
+    for i, e in enumerate(as_list(doc.get("allow") or [], "lint-allowlist.yaml: allow")):
+        e = as_dict(e, f"lint-allowlist.yaml: allow[{i}]")
+        check_id = check_enum(e.get("check"), LINT_CHECK_IDS,
+                              f"lint-allowlist.yaml: allow[{i}].check")
+        pattern = as_str(e.get("pattern"),
+                         f"lint-allowlist.yaml: allow[{i}].pattern (literal substring)")
+        reason = as_str(e.get("reason"), f"lint-allowlist.yaml: allow[{i}].reason")
+        scope = e.get("file")
+        if scope is not None:
+            scope = as_str(scope, f"lint-allowlist.yaml: allow[{i}].file")
+        entries.append({"check": check_id, "pattern": pattern, "reason": reason,
+                        "file": scope, "matched": False})
+    return entries
+
+
+def _allowlisted(entries, check_id, rel, match_text, line_text) -> bool:
+    hay = f"{match_text} {line_text}".lower()
+    for e in entries:
+        if e["check"] != check_id or (e["file"] and e["file"] != rel):
+            continue
+        if e["pattern"].lower() in hay:
+            e["matched"] = True
+            return True
+    return False
+
+
+def lint_finding(root: str, doc: dict, program: dict) -> dict:
+    """Lint the submission-facing surfaces (report + platform field files).
+
+    Read-only; returns surfaces, findings (check/severity/file/line/detail)
+    and the allowlist (with matched flags for stale-entry detection). BLOCK
+    findings fail the run; WARN findings do not (contracts section 9).
+    """
+    fid = doc["id"]
+    manifest_rel = f"packages/{fid}/manifest.yaml"
+    manifest = load_yaml_file(safe_rel(root, manifest_rel, "package manifest"),
+                              manifest_rel)
+    pkg = as_dict(manifest.get("package") or {}, f"{manifest_rel}: package")
+    materials = manifest.get("materials")
+    plat = program_platform(program)
+    spec = MATERIAL_SPECS.get(plat)
+
+    surfaces = []  # (rel, label)
+    report_rel = (as_dict(pkg.get("report") or {}, f"{manifest_rel}: package.report")).get("path")
+    if isinstance(report_rel, str) and report_rel.strip():
+        surfaces.append((report_rel, "report"))
+    field_specs = []  # (rel, field-name)
+    if isinstance(materials, dict):
+        for f_ in as_list(materials.get("fields") or [], f"{manifest_rel}: materials.fields"):
+            if isinstance(f_, dict) and isinstance(f_.get("path"), str) and f_["path"].strip():
+                field_specs.append((f_["path"], f_.get("field")))
+                surfaces.append((f_["path"], f"material:{f_.get('field')}"))
+
+    findings = []
+
+    def add(check, severity, rel, line, detail):
+        findings.append({"check": check, "severity": severity, "file": rel,
+                         "line": line, "detail": detail})
+
+    texts = {}
+    for rel, _label in surfaces:
+        p = safe_rel(root, rel, "lint surface")
+        if not os.path.isfile(p):
+            add("sections", "BLOCK", rel, 0, "file missing from the package")
+            continue
+        with open(p, encoding="utf-8", errors="ignore") as f:
+            texts[rel] = f.read()
+
+    allowlist = load_lint_allowlist(root)
+
+    def line_of(text, pos):
+        return text.count("\n", 0, pos) + 1
+
+    # addr: every 40-hex address must be a declared target (wrong-address
+    # transcriptions have survived three review rounds across four packages)
+    allowed_addrs = set()
+    for t in doc.get("targets") or []:
+        if isinstance(t, dict):
+            for k in ("address", "proxy_address", "implementation_address"):
+                v = t.get(k)
+                if isinstance(v, str):
+                    allowed_addrs.add(v.lower())
+    for t in ((program.get("scope") or {}).get("targets") or []):
+        if isinstance(t, dict) and isinstance(t.get("address"), str):
+            allowed_addrs.add(t["address"].lower())
+    if isinstance(materials, dict):
+        for ft in materials.get("form_targets") or []:
+            if isinstance(ft, dict) and isinstance(ft.get("address"), str):
+                allowed_addrs.add(ft["address"].lower())
+
+    for rel, _label in surfaces:
+        text = texts.get(rel)
+        if not text:
+            continue
+        for m in LINT_ADDR_TEXT_RE.finditer(text):
+            addr = m.group(0).lower()
+            if addr in allowed_addrs:
+                continue
+            ln = line_of(text, m.start())
+            line_text = text.splitlines()[ln - 1]
+            if _allowlisted(allowlist, "addr", rel, addr, line_text):
+                continue
+            add("addr", "BLOCK", rel, ln,
+                f"address {addr} is not a cross-check target, scope target or declared "
+                "form target — verify it or allowlist it with a reason")
+
+    # attachment: every file reference must be recipient-visible (inside the
+    # bundle zip, a declared attachment, or the bundle/export name itself)
+    members = set()
+    zip_rel = (as_dict(pkg.get("zip") or {}, f"{manifest_rel}: package.zip")).get("path")
+    if isinstance(zip_rel, str) and zip_rel.strip():
+        zp = safe_rel(root, zip_rel, "package zip")
+        if os.path.isfile(zp):
+            try:
+                with zipfile.ZipFile(zp) as zf:
+                    members = {n for n in zf.namelist() if not n.endswith("/")}
+            except (zipfile.BadZipFile, OSError):
+                pass
+    if isinstance(materials, dict) and spec:
+        members.add(spec["zip_name"].format(slug=materials.get("slug") or ""))
+    if isinstance(materials, dict):
+        for at in materials.get("attachments") or []:
+            if isinstance(at, dict) and isinstance(at.get("path"), str):
+                members.add(at["path"])
+                members.add(os.path.basename(at["path"]))
+    members.update(rel for rel, _ in surfaces)
+
+    def ref_hit(token):
+        t = token[2:] if token.startswith("./") else token
+        if t in members:
+            return True
+        return any(m.endswith("/" + t) or t.endswith("/" + m) for m in members)
+
+    for rel, _label in surfaces:
+        text = texts.get(rel)
+        if not text:
+            continue
+        stripped = LINT_URL_RE.sub(" ", text)
+        for m in LINT_FILE_RE.finditer(stripped):
+            token = m.group(0)
+            if ref_hit(token):
+                continue
+            ln = line_of(stripped, m.start())
+            lines = stripped.splitlines()
+            line_text = lines[ln - 1] if lines else ""
+            if _allowlisted(allowlist, "attachment", rel, token, line_text):
+                continue
+            add("attachment", "BLOCK", rel, ln,
+                f"file reference {token!r} is not in the attachment set (zip members, "
+                "declared attachments or the bundle name) — the recipient cannot see it")
+
+    # sections: the platform form contract survives every edit (the
+    # "rewrite deleted the run instructions" regression)
+    if spec and field_specs:
+        declared = {name: rel for rel, name in field_specs}
+        for name, fspec in spec["fields"].items():
+            rel = declared.get(name)
+            if rel is None:
+                add("sections", "BLOCK", manifest_rel, 0,
+                    f"material field {name!r} not declared — the platform form needs it")
+                continue
+            text = texts.get(rel)
+            if text is None:
+                continue
+            for header in fspec.get("headers", ()):
+                if header not in text:
+                    add("sections", "BLOCK", rel, 0,
+                        f"required section {header!r} missing — an edit dropped it "
+                        f"({name} field)")
+            if fspec.get("upload_line") and text and not UPLOAD_LINE_RE.search(text):
+                add("sections", "BLOCK", rel, 0,
+                    f"the 'Upload: <file>' line naming the bundle is missing ({name} field)")
+
+    # voice: submission-facing text states findings, not its own history
+    for rel, _label in surfaces:
+        text = texts.get(rel)
+        if not text:
+            continue
+        for pid, pattern in VOICE_PATTERNS:
+            for m in pattern.finditer(text):
+                ln = line_of(text, m.start())
+                lines = text.splitlines()
+                line_text = lines[ln - 1] if lines else ""
+                if _allowlisted(allowlist, "voice", rel, m.group(0), line_text):
+                    continue
+                add("voice", "BLOCK", rel, ln,
+                    f"internal/process vocabulary ({pid}): {m.group(0)!r} — remove it or "
+                    "allowlist it with a reason")
+        for pid, pattern in UNIVERSAL_PATTERNS:
+            for m in pattern.finditer(text):
+                ln = line_of(text, m.start())
+                lines = text.splitlines()
+                line_text = lines[ln - 1] if lines else ""
+                if _allowlisted(allowlist, "universal", rel, m.group(0), line_text):
+                    continue
+                add("universal", "WARN", rel, ln,
+                    f"universal claim ({pid}): {m.group(0)!r} — must cite the per-report "
+                    "prior-art NO_MATCH entries or a source derivation, or be scoped down")
+
+    for e in allowlist:
+        if not e["matched"]:
+            add("universal", "WARN", "lint-allowlist.yaml", 0,
+                f"stale allowlist entry ({e['check']}): {e['pattern']!r} matched nothing — "
+                "remove it before it rots into noise")
+
+    return {"surfaces": surfaces, "findings": findings, "allowlist": allowlist}
 
 
 # ---------------------------------------------------------------------------
@@ -1455,6 +1985,7 @@ def cmd_register(a) -> int:
         "evidence": [],
         "gates": [],
         "blockers": [],
+        "corrections": [],
         "submission": default_submission_block(),
         "appeal": default_appeal_block(),
         "history": [],
@@ -1940,6 +2471,38 @@ def emit_gate_failure(gf: GateFailure, a) -> None:
     emit(payload, getattr(a, "json", False))
 
 
+def cmd_lint(a) -> int:
+    """Material lint — the post-edit regression battery (contracts §9)."""
+    root = require_case(a)
+    doc, _ = load_ledger(root, a.id)
+    if STAGES.index(doc["stage"]) < STAGES.index("PACKAGED"):
+        raise LifecycleError(f"{a.id}: lint runs on packaged findings (current stage "
+                             f"{doc['stage']}); complete PACKAGED first")
+    program = load_program(root)
+    result = lint_finding(root, doc, program)
+    findings = result["findings"]
+    blocks = [f for f in findings if f["severity"] == "BLOCK"]
+    warns = [f for f in findings if f["severity"] == "WARN"]
+    status = "FAIL" if blocks else "PASS"
+    lines = [f"{a.id}: lint {status} — {len(blocks)} BLOCK, {len(warns)} WARN "
+             f"over {len(result['surfaces'])} surface(s)"]
+    for f in findings:
+        loc = f"{f['file']}:{f['line']}" if f["line"] else f["file"]
+        lines.append(f"  [{f['severity']}] {f['check']} {loc}: {f['detail']}")
+    if warns and not blocks:
+        lines.append("WARN findings do not fail the run; review each before submitting")
+    lines.append(f"LINT: {status}")
+    if a.save_log:
+        log_path = safe_rel(root, a.save_log, "lint log")
+        atomic_write(log_path, "\n".join(lines) + "\n")
+        lines.append(f"lint log saved: {a.save_log}")
+    emit({"lines": lines, "finding": a.id, "status": status,
+          "blocks": len(blocks), "warnings": len(warns), "findings": findings,
+          "surfaces": [{"path": rel, "label": label} for rel, label in result["surfaces"]]},
+         a.json)
+    return EXIT_GATE if blocks else EXIT_OK
+
+
 def cmd_advance(a) -> int:
     root = require_case(a)
     with CaseLock(root):
@@ -2206,6 +2769,202 @@ def cmd_index(a) -> int:
 
 
 # ---------------------------------------------------------------------------
+# export subcommand
+
+EXPORT_DIR_RE = re.compile(r"^(\d{2})-([a-z0-9-]+)-([a-z]+)$")
+
+
+def _export_read_manifest(root: str, fid: str) -> dict:
+    rel = f"packages/{fid}/manifest.yaml"
+    p = safe_rel(root, rel, "package manifest")
+    if not os.path.isfile(p):
+        raise LifecycleError(f"{fid}: no package manifest at {rel} — complete PACKAGED first")
+    manifest = load_yaml_file(p, rel)
+    if not isinstance(manifest.get("materials"), dict):
+        raise LifecycleError(f"{fid}: {rel} declares no materials block; cannot export")
+    return manifest
+
+
+def cmd_export(a) -> int:
+    """Assemble the submission dir from packaged findings (read-only assembly).
+
+    No ledger state changes: export copies the frozen materials out where the
+    operator pastes them into the platform form. Order of --id args is the
+    submission priority (01, 02, ...).
+    """
+    root = require_case(a)
+    prog = load_program(root)
+    plat = program_platform(prog)
+    if plat not in MATERIAL_PLATFORMS:
+        raise LifecycleError(
+            "export requires program.yaml delivery.platform to name a material platform "
+            f"(one of {sorted(MATERIAL_PLATFORMS)}); this case has {plat!r}")
+    out_root = a.out or os.path.join(root, "submission")
+
+    plan = []  # (nn, dirname, fid, doc, manifest)
+    slugs = {}
+    for i, fid in enumerate(a.ids, start=1):
+        if fid in [e[2] for e in plan]:
+            raise LifecycleError(f"--id {fid} given twice")
+        doc, _body = load_ledger(root, fid)
+        if STAGES.index(doc["stage"]) < STAGES.index("PACKAGED"):
+            raise LifecycleError(f"{fid}: stage {doc['stage']} — only PACKAGED findings export")
+        manifest = _export_read_manifest(root, fid)
+        materials = manifest["materials"]
+        slug = as_str(materials.get("slug"), "materials.slug")
+        if not SLUG_RE.fullmatch(slug):
+            raise LifecycleError(f"{fid}: materials.slug {slug!r} is not a lowercase hyphen slug")
+        if slug in slugs:
+            raise LifecycleError(f"slug {slug!r} used by both {slugs[slug]} and {fid}")
+        slugs[slug] = fid
+        severity = (doc.get("severity") or {}).get("final")
+        if not isinstance(severity, str) or not severity.strip():
+            raise LifecycleError(f"{fid}: severity.final is unset — TRIAGED must precede export")
+        dirname = f"{i:02d}-{slug}-{severity.lower()}"
+        plan.append((i, dirname, fid, doc, manifest))
+
+    # ordering-consistency guard against stale numbered dirs from earlier runs
+    if os.path.isdir(out_root):
+        existing = {}
+        for name in sorted(os.listdir(out_root)):
+            m = EXPORT_DIR_RE.match(name)
+            if m and os.path.isdir(os.path.join(out_root, name)):
+                existing[name] = (m.group(1), m.group(2), m.group(3))
+        planned_names = {d for _n, d, _f, _doc, _m in plan}
+        planned_suffixes = {d.split("-", 1)[1] for d in planned_names}
+        for name, (nn, slug_part, sev) in existing.items():
+            if name in planned_names:
+                continue
+            if f"{slug_part}-{sev}" in planned_suffixes:
+                raise LifecycleError(
+                    f"ordering changed: existing {name} but this run numbers the same "
+                    f"slug differently; remove the stale directory or keep the previous "
+                    f"--id order")
+
+    lines = []
+    readme_rows = []
+    field_help = EXPORT_README_FIELDS[plat]
+    for nn, dirname, fid, doc, manifest in plan:
+        materials = manifest["materials"]
+        slug = as_str(materials.get("slug"), "materials.slug")
+        target = os.path.join(out_root, dirname)
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        os.makedirs(target, exist_ok=True)
+        copied = []
+        for f_ in as_list(materials.get("fields"), "materials.fields"):
+            f_ = as_dict(f_, "materials.fields entry")
+            name = as_str(f_.get("field"), "materials.fields[].field")
+            if name not in MATERIAL_SPECS[plat]["fields"]:
+                raise LifecycleError(f"{fid}: unknown materials field {name!r} "
+                                     f"for platform {plat!r}")
+            rel = as_str(f_.get("path"), "materials.fields[].path")
+            expected = f_.get("sha256")
+            src = safe_rel(root, rel, "material file")
+            if not os.path.isfile(src):
+                raise LifecycleError(f"{fid}: material file missing: {rel}")
+            actual = sha256_file(src)
+            if actual != expected:
+                raise LifecycleError(
+                    f"{fid}: material {rel} hash changed since packaging "
+                    f"(manifest {expected}, actual {actual}); reopen PACKAGED instead of "
+                    "exporting drifted materials")
+            dest_rel = MATERIAL_SPECS[plat]["fields"][name]["path"]
+            dest = os.path.join(target, dest_rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copyfile(src, dest)
+            copied.append(dest_rel)
+        zip_spec = as_dict(manifest.get("package", {}).get("zip"), "package.zip")
+        zip_rel = as_str(zip_spec.get("path"), "package.zip.path")
+        zip_src = safe_rel(root, zip_rel, "package zip")
+        if not os.path.isfile(zip_src):
+            raise LifecycleError(f"{fid}: package zip missing: {zip_rel}")
+        zip_hash = sha256_file(zip_src)
+        if zip_spec.get("sha256") and zip_hash != zip_spec["sha256"]:
+            raise LifecycleError(f"{fid}: package zip {zip_rel} hash changed since packaging")
+        zip_name = MATERIAL_SPECS[plat]["zip_name"].format(slug=slug)
+        shutil.copyfile(zip_src, os.path.join(target, zip_name))
+        copied_attachments = []
+        for at_ in as_list(materials.get("attachments") or [], "materials.attachments"):
+            at_ = as_dict(at_, "materials.attachments entry")
+            arel = as_str(at_.get("path"), "materials.attachments[].path")
+            asrc = safe_rel(root, arel, "material attachment")
+            if not os.path.isfile(asrc):
+                raise LifecycleError(f"{fid}: material attachment missing: {arel}")
+            ahash = sha256_file(asrc)
+            if at_.get("sha256") and ahash != at_.get("sha256"):
+                raise LifecycleError(f"{fid}: material attachment {arel} hash changed "
+                                     "since packaging; reopen PACKAGED instead")
+            pkg_prefix = f"packages/{fid}/"
+            sub = arel[len(pkg_prefix):] if arel.startswith(pkg_prefix) else os.path.basename(arel)
+            dest = os.path.join(target, sub)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copyfile(asrc, dest)
+            copied_attachments.append(sub)
+        form_targets = as_list(materials.get("form_targets") or [],
+                               "materials.form_targets")
+        lines.append(f"{dirname}/: {', '.join(sorted(copied))} + {zip_name} "
+                     f"(sha256 {zip_hash})"
+                     + (f" + {', '.join(copied_attachments)}" if copied_attachments else ""))
+        readme_rows.append({
+            "dirname": dirname, "fid": fid,
+            "severity": (doc.get("severity") or {}).get("final"),
+            "title": doc.get("title"), "zip_sha256": zip_hash, "zip_name": zip_name,
+            "form_targets": form_targets,
+        })
+
+    readme = os.path.join(out_root, "README.md")
+    if a.readme or not os.path.isfile(readme):
+        prog_name = (prog.get("program") or {}).get("name") or (prog.get("program") or {}).get("id")
+        out = [f"# Submission packages — {prog_name} ({plat})", ""]
+        out.append(f"Assembled by `lifecycle.py export` on {now_iso()}; directory order is "
+                   "the submission priority given to the export command. Each directory is "
+                   "self-contained and maps to the platform form fields:")
+        out.append("")
+        out.extend(field_help)
+        out.append("")
+        for row in readme_rows:
+            out.append(f"## {row['dirname']}/")
+            out.append("")
+            out.append(f"- finding: `{row['fid']}`")
+            out.append(f"- severity: {row['severity']}")
+            out.append(f"- title: {row['title']}")
+            out.append(f"- {row['zip_name']} sha256: `{row['zip_sha256']}`")
+            for ft in row.get("form_targets") or []:
+                ft = as_dict(ft, "materials.form_targets entry")
+                out.append(f"- form target — {ft.get('field')}: `{ft.get('address')}` "
+                            f"(verified per {ft.get('source')})")
+            out.append("")
+        exported = {e[2] for e in plan}
+        withheld = []
+        for other in list_findings(root):
+            if other in exported:
+                continue
+            try:
+                odoc, _ = load_ledger(root, other)
+            except LifecycleError:
+                continue
+            if STAGES.index(odoc["stage"]) >= STAGES.index("TRIAGED"):
+                withheld.append((other, odoc["stage"], odoc["disposition"],
+                                 odoc.get("title", "")))
+        if withheld:
+            out.append("## Not exported this run")
+            out.append("")
+            for oid, ostage, odisp, otitle in withheld:
+                out.append(f"- `{oid}` — {odisp}, {ostage} — {otitle}")
+            out.append("")
+        out.append("Regenerate this index with `lifecycle.py export --readme …`; directories "
+                   "for dropped findings are left in place — remove them by hand.")
+        out.append("")
+        with open(readme, "w", encoding="utf-8") as f:
+            f.write("\n".join(out))
+        lines.append("README.md written")
+
+    emit({"lines": [f"exported {len(plan)} package(s) to {out_root}"] + lines}, a.json)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # record subcommands
 
 def record_common(root: str, a):
@@ -2365,6 +3124,151 @@ def cmd_record_appeal(a) -> int:
 # ---------------------------------------------------------------------------
 # init
 
+def cmd_record_correction(a) -> int:
+    """Tier-1 post-package document correction (contracts section 10).
+
+    Wording/disclosure/narration fixes over the report or material field
+    files: refresh manifest hashes, rebind PASSED-gate inputs and evidence,
+    journal the correction. Technical changes (PoC, amounts, severity,
+    targets) are rejected here — they are Tier 2 (reopen PACKAGED).
+    """
+    root = require_case(a)
+    with CaseLock(root):
+        doc, body = load_ledger(root, a.id)
+        cas_check(doc, a.expected_revision)
+        if doc["disposition"] != "OPEN":
+            raise LifecycleError(f"{a.id} is closed ({doc['disposition']}); corrections need OPEN")
+        cur = STAGES.index(doc["stage"])
+        if cur < STAGES.index("PACKAGED"):
+            raise LifecycleError(f"{a.id}: corrections apply from PACKAGED "
+                                 f"(current stage {doc['stage']})")
+        if doc["stage"] == "SUBMITTED":
+            raise LifecycleError(f"{a.id}: submitted packages never change — "
+                                 "reopen (Tier 2) instead")
+        summary = as_str(a.summary, "--summary")
+        if len(summary.strip()) < 20:
+            raise LifecycleError("--summary must state what changed and why (>= 20 characters)")
+
+        manifest_rel = f"packages/{a.id}/manifest.yaml"
+        manifest = load_yaml_file(safe_rel(root, manifest_rel, "package manifest"),
+                                  manifest_rel)
+        pkg = as_dict(manifest.get("package") or {}, f"{manifest_rel}: package")
+        materials = manifest.get("materials") or {}
+        report_rel = (pkg.get("report") or {}).get("path")
+        field_paths = {f_.get("path") for f_ in (materials.get("fields") or [])
+                       if isinstance(f_, dict)}
+        eligible = {p for p in ({report_rel} | field_paths)
+                    if isinstance(p, str) and p.strip()}
+        if not eligible:
+            raise LifecycleError(f"{manifest_rel}: no report or material fields declared — "
+                                 "nothing Tier-1 correctable")
+
+        changed = [as_str(f, "--files entry") for f in (a.files or [])]
+        if not changed:
+            raise LifecycleError("--files required: list every document this batch changed")
+        for rel in changed:
+            if rel not in eligible:
+                raise LifecycleError(
+                    f"{rel}: not a Tier-1 surface (the report or a material field file). "
+                    "A technical change (PoC, amounts, severity, targets, eligibility) is "
+                    "Tier 2: reopen --affect-stage PACKAGED and build a new package version")
+            if not os.path.isfile(safe_rel(root, rel, "correction file")):
+                raise LifecycleError(f"correction file not found: {rel}")
+
+        lint_rel = as_str(a.lint_log, "--lint-log (a saved lint log; see lint --save-log)")
+        lint_p = safe_rel(root, lint_rel, "lint log")
+        if not os.path.isfile(lint_p):
+            raise LifecycleError(f"lint log not found: {lint_rel} — run "
+                                 "`lifecycle.py lint --id … --save-log …` after the edits")
+        with open(lint_p, encoding="utf-8", errors="ignore") as f:
+            if "LINT: PASS" not in f.read():
+                raise LifecycleError(f"lint log {lint_rel} does not carry 'LINT: PASS' — fix "
+                                     "the BLOCK findings, re-run lint, then record the correction")
+
+        targeted_rel = a.targeted_review
+        if cur >= STAGES.index("SELF_REVIEWED"):
+            targeted_rel = as_str(targeted_rel,
+                                  "--targeted-review (required once SELF_REVIEWED): an "
+                                  "independent sign-off covering exactly the changed passages")
+        if targeted_rel:
+            tp = safe_rel(root, targeted_rel, "targeted review")
+            if not os.path.isfile(tp):
+                raise LifecycleError(f"targeted review not found: {targeted_rel}")
+
+        # dual-copy discipline: a changed doc that is a zip member forces a
+        # zip rebuild in the same batch (loose docs and zip must never drift)
+        zip_spec = as_dict(pkg.get("zip") or {}, f"{manifest_rel}: package.zip")
+        zip_rel = as_str(zip_spec.get("path"), f"{manifest_rel}: package.zip.path")
+        zip_p = safe_rel(root, zip_rel, "package zip")
+        prefix = f"packages/{a.id}/"
+        zip_members = set()
+        if os.path.isfile(zip_p):
+            try:
+                with zipfile.ZipFile(zip_p) as zf:
+                    zip_members = {n for n in zf.namelist() if not n.endswith("/")}
+            except (zipfile.BadZipFile, OSError) as exc:
+                raise LifecycleError(f"package zip unreadable: {zip_rel}: {exc}")
+        for rel in changed:
+            member = rel[len(prefix):] if rel.startswith(prefix) else rel
+            if member in zip_members and not a.zip_refreshed:
+                raise LifecycleError(
+                    f"{rel} is a package-zip member; this correction must rebuild the zip "
+                    "in the same batch — rebuild it, then pass --zip-refreshed")
+
+        new_hashes = {rel: sha256_file(safe_rel(root, rel, "correction file"))
+                      for rel in changed}
+        for f_ in as_list(pkg.get("files") or [], f"{manifest_rel}: package.files"):
+            if isinstance(f_, dict) and f_.get("path") in new_hashes:
+                f_["sha256"] = new_hashes[f_["path"]]
+        if isinstance(materials, dict):
+            for f_ in as_list(materials.get("fields") or [], f"{manifest_rel}: materials.fields"):
+                if isinstance(f_, dict) and f_.get("path") in new_hashes:
+                    f_["sha256"] = new_hashes[f_["path"]]
+        zip_refreshed = bool(a.zip_refreshed)
+        if zip_refreshed:
+            zip_spec["sha256"] = sha256_file(zip_p)
+        with open(safe_rel(root, manifest_rel, "package manifest"), "w", encoding="utf-8") as f:
+            yaml.safe_dump(manifest, f, sort_keys=False, allow_unicode=True, width=120)
+
+        # rebind evidence entries and PASSED-gate input hashes; every rebind
+        # is journaled in the correction + history event
+        changed_paths = list(changed) + [manifest_rel]
+        if zip_refreshed:
+            changed_paths.append(zip_rel)
+        purposes = {ev.get("path"): ev.get("purpose") for ev in doc.get("evidence", [])}
+        for rel in changed_paths:
+            digest = sha256_file(safe_rel(root, rel, "correction path"))
+            upsert_evidence(doc, rel, digest,
+                            purposes.get(rel) or "package-doc", "record:correction")
+            for g in doc.get("gates", []):
+                if g.get("status") != "PASSED":
+                    continue
+                for inp in g.get("inputs", []):
+                    if inp.get("path") == rel:
+                        inp["sha256"] = digest
+        if targeted_rel:
+            upsert_evidence(doc, targeted_rel,
+                            sha256_file(safe_rel(root, targeted_rel, "targeted review")),
+                            "correction-targeted-review", "record:correction")
+
+        doc.setdefault("corrections", []).append({
+            "at": now_iso(), "summary": summary, "files": list(changed),
+            "lint_log": lint_rel, "zip_refreshed": zip_refreshed,
+            "targeted_review": targeted_rel,
+        })
+        append_history(doc, "correction_recorded", {
+            "summary": summary, "files": changed,
+            "zip_refreshed": zip_refreshed, "lint_log": lint_rel,
+            "targeted_review": targeted_rel,
+        })
+        save_ledger(root, doc, body)
+    rebuild_index_tolerant(root)
+    emit({"lines": [f"{a.id}: correction recorded (revision {doc['revision']}); "
+                    f"{len(changed)} file(s) rebound, zip "
+                    f"{'refreshed' if zip_refreshed else 'unchanged'}"]}, a.json)
+    return EXIT_OK
+
+
 def cmd_init(a) -> int:
     root = a.case_root
     os.makedirs(root, exist_ok=True)
@@ -2466,6 +3370,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_advance)
 
+    sp = sub.add_parser(
+        "lint",
+        help="material lint: regression battery over the report + platform field files "
+             "(run after EVERY edit batch; exit 1 on BLOCK findings)")
+    sp.add_argument("--case-root", required=True)
+    sp.add_argument("--id", required=True)
+    sp.add_argument("--save-log", dest="save_log",
+                    help="write the lint output plus a final 'LINT: PASS|FAIL' marker to "
+                         "this case-root-relative file (consumed by record correction)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_lint)
+
     sp = sub.add_parser("close", help="record a disposition")
     sp.add_argument("--case-root", required=True)
     sp.add_argument("--id", required=True)
@@ -2500,6 +3416,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--case-root", required=True)
     sp.set_defaults(func=cmd_index)
 
+    sp = sub.add_parser(
+        "export",
+        help="assemble submission materials (Immunefi/HackenProof form fields) from packaged findings")
+    sp.add_argument("--case-root", required=True)
+    sp.add_argument("--id", dest="ids", action="append", required=True, metavar="F-…",
+                    help="finding id; repeatable — order sets submission priority (01, 02, …)")
+    sp.add_argument("--out",
+                    help="output directory (default: <case-root>/submission)")
+    sp.add_argument("--readme", action="store_true",
+                    help="(re)generate the README.md index even if one exists")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_export)
+
     sp = sub.add_parser("record", help="record receipts / blockers / appeals")
     rsp = sp.add_subparsers(dest="record_command", required=True, metavar="record_command")
 
@@ -2519,6 +3448,27 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--expected-revision", type=int, required=True)
     q.add_argument("--json", action="store_true")
     q.set_defaults(func=cmd_record_resolve)
+
+    q = rsp.add_parser("correction",
+                       help="record a Tier-1 post-package doc correction (wording/disclosure "
+                            "only; technical changes reopen PACKAGED instead)")
+    q.add_argument("--case-root", required=True)
+    q.add_argument("--id", required=True)
+    q.add_argument("--summary", required=True,
+                   help="what changed and why (>= 20 characters)")
+    q.add_argument("--files", nargs="+", required=True,
+                   help="every changed doc: the report or material field files")
+    q.add_argument("--lint-log", dest="lint_log", required=True,
+                   help="saved lint log carrying 'LINT: PASS' (lint --save-log)")
+    q.add_argument("--zip-refreshed", dest="zip_refreshed", action="store_true",
+                   help="the package zip was rebuilt in this batch (mandatory when a "
+                        "changed doc is a zip member)")
+    q.add_argument("--targeted-review", dest="targeted_review",
+                   help="independent sign-off on the changed passages (required once "
+                        "SELF_REVIEWED)")
+    q.add_argument("--expected-revision", type=int, required=True)
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_record_correction)
 
     q = rsp.add_parser("submission")
     q.add_argument("--case-root", required=True)

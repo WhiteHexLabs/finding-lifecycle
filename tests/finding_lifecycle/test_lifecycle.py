@@ -188,6 +188,10 @@ class Base(unittest.TestCase):
             "no_reports_found": bool(no_reports),
             "no_reports_note": "docs site and program page list no audits"
                                if no_reports else None,
+            "no_reports_confirmation": (
+                {"by": "agent-2/session-x", "at": "2026-09-14",
+                 "note": "independent re-search of both channels; no audit reports"}
+                if no_reports else None),
             "conclusion": conclusion,
         })
 
@@ -512,6 +516,36 @@ class TestScenarioPriorArt(Base):
                  "--reason", "checked docs site and program page, no audits published anywhere",
                  "--expected-revision", 1])
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_no_reports_without_confirmation_blocks(self):
+        # absence is the highest-stakes claim in the gate: no independent
+        # re-search confirmation -> the gate stays closed
+        fid = self.register()
+        self.build_prior_art(fid, no_reports=True)
+        path = self.evidence(fid, "prior-art.yaml")
+        doc = yaml.safe_load(open(path))
+        del doc["no_reports_confirmation"]
+        wyaml(path, doc)
+        r = run(["advance", "--case-root", self.root, "--id", fid,
+                 "--reviewer", "t",
+                 "--reason", "checked docs site and program page, no audits published anywhere",
+                 "--expected-revision", 1])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no_reports_confirmation", r.stdout + r.stderr)
+
+    def test_no_reports_single_channel_blocks(self):
+        fid = self.register()
+        self.build_prior_art(fid, no_reports=True)
+        path = self.evidence(fid, "prior-art.yaml")
+        doc = yaml.safe_load(open(path))
+        doc["discovery"] = doc["discovery"][:1]
+        wyaml(path, doc)
+        r = run(["advance", "--case-root", self.root, "--id", fid,
+                 "--reviewer", "t",
+                 "--reason", "checked only the docs site, no audits published anywhere",
+                 "--expected-revision", 1])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("2 distinct", r.stdout + r.stderr)
 
     def test_no_reports_undeclared_fails(self):
         fid = self.register()
@@ -1007,6 +1041,985 @@ class TestReopen(Base):
                  "--reason", "x" * 40, "--affect-stage", "CROSS_CHECKED",
                  "--expected-revision", 1])
         self.assertEqual(r.returncode, 2)
+
+
+# ---------------------------------------------------------------------------
+# platform materials: immunefi form-field files gate PACKAGED, export assembles
+
+class TestImmunefiMaterials(Base):
+    def set_platform(self, platform):
+        path = os.path.join(self.root, "program.yaml")
+        with open(path, encoding="utf-8") as f:
+            prog = yaml.safe_load(f)
+        prog.setdefault("delivery", {})["platform"] = platform
+        wyaml(path, prog)
+
+    def add_materials(self, fid, slug="withdraw-reentrancy", drop_header=None,
+                      bad_hash_field=None, drop_field=False):
+        pkg = os.path.join(self.root, "packages", fid, "immunefi")
+        title = wfile(os.path.join(pkg, "1-title.txt"),
+                      "Reentrancy in withdraw() drains all deposits\n")
+        desc_text = ("## Brief/Intro\n\nintro\n\n## Vulnerability Details\n\n"
+                     "details\n\n## Impact Details\n\nimpact\n\n## References\n\nrefs\n")
+        if drop_header == "description":
+            desc_text = desc_text.replace("## Impact Details\n\n", "")
+        desc = wfile(os.path.join(pkg, "2-description.txt"), desc_text)
+        poc_text = ("pinned fork text\n\n### Threat modeled\n\nmodeled\n\n"
+                    "### Reproduce\n\nreproduce\n\n### Expected output\n\n"
+                    "```\nPASS\n```\n\n### What the test proves\n\nproves\n")
+        if drop_header == "poc":
+            poc_text = poc_text.replace("### Reproduce\n\n", "")
+        poc = wfile(os.path.join(pkg, "3-poc.txt"), poc_text)
+        fields = [
+            {"field": "title", "path": f"packages/{fid}/immunefi/1-title.txt",
+             "sha256": sha(title)},
+            {"field": "description", "path": f"packages/{fid}/immunefi/2-description.txt",
+             "sha256": sha(desc)},
+            {"field": "poc", "path": f"packages/{fid}/immunefi/3-poc.txt",
+             "sha256": sha(poc)},
+        ]
+        if drop_field:
+            fields = fields[:2]
+        if bad_hash_field:
+            for f_ in fields:
+                if f_["field"] == bad_hash_field:
+                    f_["sha256"] = "0" * 64
+        mpath = os.path.join(self.root, "packages", fid, "manifest.yaml")
+        with open(mpath, encoding="utf-8") as f:
+            manifest = yaml.safe_load(f)
+        manifest["materials"] = {"platform": "immunefi", "slug": slug,
+                                 "fields": fields}
+        wyaml(mpath, manifest)
+
+    def package_with_materials(self, fid, **kw):
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, **kw)
+        self.advance(fid, "PACKAGED",
+                     f"clean-dir run passed; log at evidence/{fid}/clean-run.log")
+
+    def test_immunefi_requires_materials(self):
+        self.set_platform("immunefi")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("materials missing", r.stdout + r.stderr)
+
+    def test_immunefi_materials_pass(self):
+        self.set_platform("immunefi")
+        fid = self.register()
+        self.package_with_materials(fid)
+        fm = read_ledger(self.root, fid)
+        self.assertEqual(fm["stage"], "PACKAGED")
+        purposes = [e["purpose"] for e in fm["evidence"]]
+        for name in ("material:title", "material:description", "material:poc"):
+            self.assertIn(name, purposes)
+        # materials are gate inputs: editing one afterwards invalidates integrity
+        wfile(os.path.join(self.root, "packages", fid, "immunefi", "1-title.txt"),
+              "edited title\n")
+        r = run(["check", "--case-root", self.root, "--id", fid])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("INVALID", r.stdout)
+        r = run(["resume", "--case-root", self.root, "--id", fid, "--json"])
+        self.assertIn("INVALID", r.stdout)
+
+    def test_immunefi_missing_header_blocks(self):
+        self.set_platform("immunefi")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, drop_header="description")
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("## Impact Details", r.stdout + r.stderr)
+        self.add_materials(fid, drop_header="poc")
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("### Reproduce", r.stdout + r.stderr)
+
+    def test_immunefi_hash_mismatch_and_missing_field_block(self):
+        self.set_platform("immunefi")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, bad_hash_field="title")
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("hash mismatch", r.stdout + r.stderr)
+        self.add_materials(fid, drop_field=True)
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("missing: poc", r.stdout + r.stderr)
+
+    def test_platform_enum_enforced(self):
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid)
+        self.set_platform("Immunefi")
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=2)
+        self.assertIn("delivery.platform", r.stderr)
+
+    def test_materials_without_platform_flagged(self):
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid)
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("does not match program.yaml", r.stdout + r.stderr)
+
+
+class TestExport(Base):
+    def packaged_with_materials(self, slug):
+        self.set_platform("immunefi")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, slug=slug)
+        self.advance(fid, "PACKAGED",
+                     f"clean-dir run passed; log at evidence/{fid}/clean-run.log")
+        return fid
+
+    def set_platform(self, platform):
+        path = os.path.join(self.root, "program.yaml")
+        with open(path, encoding="utf-8") as f:
+            prog = yaml.safe_load(f)
+        prog.setdefault("delivery", {})["platform"] = platform
+        wyaml(path, prog)
+
+    def add_materials(self, fid, slug):
+        # minimal valid materials (headers satisfy the immunefi format)
+        pkg = os.path.join(self.root, "packages", fid, "immunefi")
+        title = wfile(os.path.join(pkg, "1-title.txt"), "title line\n")
+        desc = wfile(os.path.join(pkg, "2-description.txt"),
+                     "## Brief/Intro\n\n## Vulnerability Details\n\n"
+                     "## Impact Details\n\n## References\n")
+        poc = wfile(os.path.join(pkg, "3-poc.txt"),
+                    "### Threat modeled\n\n### Reproduce\n\n"
+                    "### Expected output\n\n### What the test proves\n")
+        mpath = os.path.join(self.root, "packages", fid, "manifest.yaml")
+        with open(mpath, encoding="utf-8") as f:
+            manifest = yaml.safe_load(f)
+        manifest["materials"] = {
+            "platform": "immunefi", "slug": slug,
+            "fields": [
+                {"field": "title", "path": f"packages/{fid}/immunefi/1-title.txt",
+                 "sha256": sha(title)},
+                {"field": "description", "path": f"packages/{fid}/immunefi/2-description.txt",
+                 "sha256": sha(desc)},
+                {"field": "poc", "path": f"packages/{fid}/immunefi/3-poc.txt",
+                 "sha256": sha(poc)},
+            ],
+        }
+        wyaml(mpath, manifest)
+
+    def test_export_orders_and_copies(self):
+        fid_b = self.packaged_with_materials("drains-deposits")
+        fid_a = self.packaged_with_materials("stale-oracle-feed")
+        out = os.path.join(self.tmp, "submission")
+        r = run(["export", "--case-root", self.root, "--id", fid_b,
+                 "--id", fid_a, "--out", out, "--json"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.isdir(os.path.join(out, "01-drains-deposits-high")))
+        self.assertTrue(os.path.isdir(os.path.join(out, "02-stale-oracle-feed-high")))
+        for d in ("01-drains-deposits-high", "02-stale-oracle-feed-high"):
+            for f_ in ("1-title.txt", "2-description.txt", "3-poc.txt", "package.zip"):
+                self.assertTrue(os.path.isfile(os.path.join(out, d, f_)), f"{d}/{f_}")
+        readme = open(os.path.join(out, "README.md"), encoding="utf-8").read()
+        self.assertIn("01-drains-deposits-high", readme)
+        self.assertIn(fid_a, readme)
+        self.assertIn("package.zip sha256", readme)
+        # rerun with the same order is idempotent; README is not clobbered
+        wfile(os.path.join(out, "README.md"), readme + "manual note\n")
+        r = run(["export", "--case-root", self.root, "--id", fid_b,
+                 "--id", fid_a, "--out", out, "--json"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("manual note", open(os.path.join(out, "README.md"),
+                                          encoding="utf-8").read())
+
+    def test_export_reordering_aborts(self):
+        fid_b = self.packaged_with_materials("drains-deposits")
+        fid_a = self.packaged_with_materials("stale-oracle-feed")
+        out = os.path.join(self.tmp, "submission")
+        r = run(["export", "--case-root", self.root, "--id", fid_b,
+                 "--id", fid_a, "--out", out])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = run(["export", "--case-root", self.root, "--id", fid_a,
+                 "--id", fid_b, "--out", out])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("ordering changed", r.stderr)
+
+    def test_export_drifted_material_aborts(self):
+        fid = self.packaged_with_materials("drains-deposits")
+        out = os.path.join(self.tmp, "submission")
+        wfile(os.path.join(self.root, "packages", fid, "immunefi", "1-title.txt"),
+              "edited after packaging\n")
+        r = run(["export", "--case-root", self.root, "--id", fid, "--out", out])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("hash changed", r.stderr)
+
+    def test_export_requires_material_platform(self):
+        fid = self.register()
+        r = run(["export", "--case-root", self.root, "--id", fid])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("delivery.platform", r.stderr)
+
+    def test_export_requires_packaged(self):
+        self.set_platform("immunefi")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        r = run(["export", "--case-root", self.root, "--id", fid])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("PACKAGED", r.stderr)
+
+
+# ---------------------------------------------------------------------------
+# hackenproof platform: fields/ four-field kit + full write-up gate PACKAGED,
+# export keeps the fields/ layout and renames the bundle
+
+class TestHackenproofMaterials(Base):
+    def set_platform(self, platform):
+        path = os.path.join(self.root, "program.yaml")
+        with open(path, encoding="utf-8") as f:
+            prog = yaml.safe_load(f)
+        prog.setdefault("delivery", {})["platform"] = platform
+        wyaml(path, prog)
+
+    def add_materials(self, fid, slug="withdraw-reentrancy", drop_header=None,
+                      bad_hash_field=None, drop_field=False, drop_upload=False,
+                      wrong_path_field=None):
+        pkg = os.path.join(self.root, "packages", fid, "hackenproof")
+        title = wfile(os.path.join(pkg, "fields", "1-title.txt"),
+                      "Fast-withdrawal gate pays out with zero signatures\n")
+        details_text = ("**Severity.** Critical. failure reachable in unmodified code.\n\n"
+                        "**Location.** `Verifier.sol:320-343` (`requireValidTxSignatures`).\n\n"
+                        "**Type:** authentication bypass.\n\n"
+                        "## Root cause\n\nrc\n\n## Precondition\n\nowner deletes keys\n\n"
+                        "## PoC\n\n| Test | State | Result |\n\n## Impact\n\npool drained\n\n"
+                        "## Fix\n\ncount the checked set\n")
+        if drop_header == "vulnerability_details":
+            details_text = details_text.replace("## Fix\n\n", "")
+        details = wfile(os.path.join(pkg, "fields", "2-vulnerability-details.md"),
+                        details_text)
+        steps_text = ("## How to run\n\nunzip the bundle and forge test -vv\n\n"
+                      "## Expected output (attached as forge-test-output.txt)\n\n"
+                      "```\n4 passed\n```\n\n## What each test proves\n\n1. drain\n")
+        if drop_header == "validation_steps":
+            steps_text = steps_text.replace("## What each test proves\n\n", "")
+        steps = wfile(os.path.join(pkg, "fields", "3-validation-steps.md"), steps_text)
+        files_text = (f"Upload: {slug}-poc-bundle.zip (self-contained Foundry project).\n\n"
+                      "Bundle contents:\n- test/PoC.t.sol\n\n"
+                      "Run: unzip, cd, forge test -vv.\n")
+        if drop_upload:
+            files_text = files_text.replace("Upload: ", "Attach: ")
+        files = wfile(os.path.join(pkg, "fields", "4-supporting-files.txt"), files_text)
+        sub_text = ("# Finding 1 - gate pays with zero signatures\n\n"
+                    "## Root cause\n\nrc\n\n## Reproduction\n\nunzip and run\n")
+        if drop_header == "submission":
+            sub_text = sub_text.replace("## Reproduction\n\n", "")
+        sub = wfile(os.path.join(pkg, "submission.md"), sub_text)
+        fields = [
+            {"field": "title", "path": f"packages/{fid}/hackenproof/fields/1-title.txt",
+             "sha256": sha(title)},
+            {"field": "vulnerability_details",
+             "path": f"packages/{fid}/hackenproof/fields/2-vulnerability-details.md",
+             "sha256": sha(details)},
+            {"field": "validation_steps",
+             "path": f"packages/{fid}/hackenproof/fields/3-validation-steps.md",
+             "sha256": sha(steps)},
+            {"field": "supporting_files",
+             "path": f"packages/{fid}/hackenproof/fields/4-supporting-files.txt",
+             "sha256": sha(files)},
+            {"field": "submission", "path": f"packages/{fid}/hackenproof/submission.md",
+             "sha256": sha(sub)},
+        ]
+        if wrong_path_field:
+            for f_ in fields:
+                if f_["field"] == wrong_path_field:
+                    f_["path"] = f"packages/{fid}/hackenproof/{os.path.basename(f_['path'])}"
+        if drop_field:
+            fields = fields[:4]
+        if bad_hash_field:
+            for f_ in fields:
+                if f_["field"] == bad_hash_field:
+                    f_["sha256"] = "0" * 64
+        mpath = os.path.join(self.root, "packages", fid, "manifest.yaml")
+        with open(mpath, encoding="utf-8") as f:
+            manifest = yaml.safe_load(f)
+        manifest["materials"] = {"platform": "hackenproof", "slug": slug,
+                                 "fields": fields}
+        wyaml(mpath, manifest)
+
+    def package_with_materials(self, fid, **kw):
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, **kw)
+        self.advance(fid, "PACKAGED",
+                     f"clean-dir run passed; log at evidence/{fid}/clean-run.log")
+
+    def test_hackenproof_requires_materials(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("materials missing", r.stdout + r.stderr)
+        self.assertIn("hackenproof/fields/1-title.txt", r.stdout + r.stderr)
+
+    def test_hackenproof_materials_pass(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.package_with_materials(fid)
+        fm = read_ledger(self.root, fid)
+        self.assertEqual(fm["stage"], "PACKAGED")
+        purposes = [e["purpose"] for e in fm["evidence"]]
+        for name in ("material:title", "material:vulnerability_details",
+                     "material:validation_steps", "material:supporting_files",
+                     "material:submission"):
+            self.assertIn(name, purposes)
+        # materials are gate inputs: editing one afterwards invalidates integrity
+        wfile(os.path.join(self.root, "packages", fid, "hackenproof",
+                           "submission.md"), "edited write-up\n")
+        r = run(["check", "--case-root", self.root, "--id", fid])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("INVALID", r.stdout)
+
+    def test_hackenproof_missing_header_blocks(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        for field_name, header in (("vulnerability_details", "## Fix"),
+                                   ("validation_steps", "## What each test proves"),
+                                   ("submission", "## Reproduction")):
+            self.add_materials(fid, drop_header=field_name)
+            r = self.advance(fid, "PACKAGED",
+                             f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                             code=1)
+            self.assertIn(header, r.stdout + r.stderr)
+
+    def test_hackenproof_upload_line_blocks(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, drop_upload=True)
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("Upload:", r.stdout + r.stderr)
+
+    def test_hackenproof_flat_layout_blocked(self):
+        # the fields/ subdirectory layout is canonical; a flat file is rejected
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, wrong_path_field="title")
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("must be the packages/" + fid + "/hackenproof/fields/1-title.txt",
+                      r.stdout + r.stderr)
+
+    def test_hackenproof_hash_mismatch_and_missing_field_block(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        self.add_materials(fid, bad_hash_field="title")
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("hash mismatch", r.stdout + r.stderr)
+        self.add_materials(fid, drop_field=True)
+        r = self.advance(fid, "PACKAGED",
+                         f"clean-dir run passed; log at evidence/{fid}/clean-run.log",
+                         code=1)
+        self.assertIn("missing: submission", r.stdout + r.stderr)
+
+
+class TestHackenproofExport(TestHackenproofMaterials):
+    def test_export_keeps_fields_layout_and_renames_bundle(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        slug = "zero-signer-drain"
+        self.package_with_materials(fid, slug=slug)
+        out = os.path.join(self.tmp, "submission")
+        r = run(["export", "--case-root", self.root, "--id", fid, "--out", out])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = os.path.join(out, "01-" + slug + "-high")
+        for rel in ("fields/1-title.txt", "fields/2-vulnerability-details.md",
+                    "fields/3-validation-steps.md", "fields/4-supporting-files.txt",
+                    "submission.md", slug + "-poc-bundle.zip"):
+            self.assertTrue(os.path.isfile(os.path.join(d, rel)), rel)
+        self.assertFalse(os.path.exists(os.path.join(d, "package.zip")))
+        readme = open(os.path.join(out, "README.md"), encoding="utf-8").read()
+        self.assertIn(slug + "-poc-bundle.zip sha256", readme)
+        self.assertIn("fields/2-vulnerability-details.md", readme)
+        # the exported bundle is byte-identical to the frozen package zip
+        pkg_zip = os.path.join(self.root, "packages", fid, "package.zip")
+        self.assertEqual(sha(pkg_zip),
+                         sha(os.path.join(d, slug + "-poc-bundle.zip")))
+
+
+# ---------------------------------------------------------------------------
+# material lint battery + Tier-1 corrections (contracts sections 9-10)
+
+CLEAN_TEXTS = {
+    "fields/1-title.txt":
+        "Freeze controls can consume the redemption window\n",
+    "fields/2-vulnerability-details.md":
+        "**Severity.** Medium. gated window closes on the victim.\n\n"
+        "**Location.** `withdraw()` in the vault implementation.\n\n"
+        "**Type:** business logic.\n\n"
+        "## Root cause\n\nrc\n\n## Precondition\n\na role holders act\n\n"
+        "## PoC\n\nsee the validation steps field\n\n## Impact\n\nwindow lost\n\n"
+        "## Fix\n\ngate the window\n",
+    "fields/3-validation-steps.md":
+        "## How to run\n\n```\nunzip bundle && cd poc\nforge test -vv\n```\n\n"
+        "## Expected output\n\nsee forge-test-output.txt attached beside the bundle\n\n"
+        "## What each test proves\n\n1. window closes while gated\n",
+    "fields/4-supporting-files.txt":
+        "Upload: {slug}-poc-bundle.zip (self-contained).\n\n"
+        "Bundle contents:\n- test/Exploit.t.sol\n- lib/util.sh\n- report.en.md\n\n"
+        "Run: unzip, forge test -vv.\n",
+    "submission.md":
+        "# Finding 1 - window consumed\n\n## Root cause\n\nrc\n\n"
+        "## Reproduction\n\nunzip and run\n",
+}
+
+
+class TestLintBattery(Base):
+    """The post-edit regression battery over report + platform field files."""
+
+    def set_platform(self, platform):
+        path = os.path.join(self.root, "program.yaml")
+        with open(path, encoding="utf-8") as f:
+            prog = yaml.safe_load(f)
+        prog.setdefault("delivery", {})["platform"] = platform
+        wyaml(path, prog)
+
+    def package_with(self, fid, slug="freeze-consumes-window", texts=None,
+                     form_targets=True, attachments=True):
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        texts = dict(CLEAN_TEXTS, **(texts or {}))
+        pkg = os.path.join(self.root, "packages", fid, "hackenproof")
+        hashes = {n: sha(wfile(os.path.join(pkg, n), t.format(slug=slug)))
+                  for n, t in texts.items()}
+        fields = [
+            {"field": "title", "path": f"packages/{fid}/hackenproof/fields/1-title.txt",
+             "sha256": hashes["fields/1-title.txt"]},
+            {"field": "vulnerability_details",
+             "path": f"packages/{fid}/hackenproof/fields/2-vulnerability-details.md",
+             "sha256": hashes["fields/2-vulnerability-details.md"]},
+            {"field": "validation_steps",
+             "path": f"packages/{fid}/hackenproof/fields/3-validation-steps.md",
+             "sha256": hashes["fields/3-validation-steps.md"]},
+            {"field": "supporting_files",
+             "path": f"packages/{fid}/hackenproof/fields/4-supporting-files.txt",
+             "sha256": hashes["fields/4-supporting-files.txt"]},
+            {"field": "submission",
+             "path": f"packages/{fid}/hackenproof/submission.md",
+             "sha256": hashes["submission.md"]},
+        ]
+        materials = {"platform": "hackenproof", "slug": slug, "fields": fields}
+        if form_targets:
+            materials["form_targets"] = [
+                {"field": "Impacted contract", "address": TARGET_ADDR,
+                 "source": "PROVENANCE.md + registry snapshot at block 19000000"}]
+        if attachments:
+            forge_out = wfile(os.path.join(self.root, "packages", fid,
+                                           "forge-test-output.txt"),
+                              "Ran 1 test\n[PASS] test_window (gas: 1)\nSuite result: ok\n")
+            materials["attachments"] = [
+                {"path": f"packages/{fid}/forge-test-output.txt",
+                 "sha256": sha(forge_out),
+                 "note": "verbatim forge output, also pasted in the validation field"}]
+        mpath = os.path.join(self.root, "packages", fid, "manifest.yaml")
+        with open(mpath, encoding="utf-8") as f:
+            manifest = yaml.safe_load(f)
+        manifest["materials"] = materials
+        wyaml(mpath, manifest)
+
+    def packaged(self, **kw):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.package_with(fid, **kw)
+        self.advance(fid, "PACKAGED",
+                     f"clean-dir run passed; log at evidence/{fid}/clean-run.log")
+        return fid
+
+    def lint(self, fid, *extra):
+        return run(["lint", "--case-root", self.root, "--id", fid, *extra])
+
+    def test_clean_package_lints_pass(self):
+        fid = self.packaged()
+        r = self.lint(fid, "--save-log", f"evidence/{fid}/lint-1.log")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("LINT: PASS", r.stdout)
+        log = open(self.evidence(fid, "lint-1.log"), encoding="utf-8").read()
+        self.assertIn("LINT: PASS", log)
+
+    def test_unknown_address_blocks(self):
+        # the wrong-Core-address class: a 40-hex address that is not a target
+        fid = self.packaged(texts={
+            "fields/2-vulnerability-details.md":
+                CLEAN_TEXTS["fields/2-vulnerability-details.md"].replace(
+                    "## Root cause",
+                    "## Root cause\n\ncontract at 0x" + "99" * 20 + " is impacted\n\n")})
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("addr", r.stdout)
+        self.assertIn("0x" + "99" * 20, r.stdout)
+
+    def test_address_allowlist_with_reason(self):
+        fid = self.packaged(texts={
+            "fields/2-vulnerability-details.md":
+                CLEAN_TEXTS["fields/2-vulnerability-details.md"].replace(
+                    "## Root cause",
+                    "## Root cause\n\nhelper 0x" + "99" * 20 + " deployed by the attacker\n\n")})
+        wyaml(os.path.join(self.root, "lint-allowlist.yaml"), {"allow": [
+            {"check": "addr", "pattern": "0x" + "99" * 20,
+             "reason": "attacker helper contract, mentioned only"},
+        ]})
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_stale_allowlist_entry_warns(self):
+        fid = self.packaged()
+        wyaml(os.path.join(self.root, "lint-allowlist.yaml"), {"allow": [
+            {"check": "voice", "pattern": "nonexistent-marker",
+             "reason": "matches nothing anymore"},
+        ]})
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("stale allowlist entry", r.stdout)
+
+    def test_dangling_file_reference_blocks(self):
+        # the PACKAGE-VERIFICATION.json class: naming a file the recipient
+        # does not have
+        fid = self.packaged(texts={
+            "fields/4-supporting-files.txt":
+                CLEAN_TEXTS["fields/4-supporting-files.txt"] +
+                "\nIntegrity checks are recorded in PACKAGE-VERIFICATION.json.\n"})
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("attachment", r.stdout)
+        self.assertIn("PACKAGE-VERIFICATION.json", r.stdout)
+
+    def test_declared_attachment_reference_passes(self):
+        # forge-test-output.txt travels with the submission via
+        # materials.attachments, so referencing it is fine
+        fid = self.packaged()
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_sections_regression_blocks(self):
+        # the "rewrite deleted the run instructions" regression: the edit
+        # happens AFTER the gate passed, so only lint catches it
+        fid = self.packaged()
+        wfile(os.path.join(self.root, "packages", fid, "hackenproof",
+                           "fields", "3-validation-steps.md"),
+              "## Validation was performed\n\nsee log\n")
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("sections", r.stdout)
+        self.assertIn("## How to run", r.stdout)
+
+    def test_voice_narration_blocks(self):
+        fid = self.packaged(texts={
+            "fields/2-vulnerability-details.md":
+                CLEAN_TEXTS["fields/2-vulnerability-details.md"].replace(
+                    "## Fix", "## Fix\n\nthis review corrected the amounts\n\n")})
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("voice", r.stdout)
+
+    def test_universal_claim_only_warns(self):
+        fid = self.packaged(texts={
+            "fields/2-vulnerability-details.md":
+                CLEAN_TEXTS["fields/2-vulnerability-details.md"].replace(
+                    "## Impact", "## Impact\n\nthis interaction never happened in production\n\n")})
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("universal", r.stdout)
+        self.assertIn("WARN", r.stdout)
+
+    def test_lint_requires_packaged(self):
+        fid = self.register()
+        r = self.lint(fid)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("PACKAGED", r.stderr)
+
+
+class TestRecordCorrection(Base):
+    """Tier-1 post-package corrections: lint gate, hash rebinding, tiers."""
+
+    def set_platform(self, platform):
+        path = os.path.join(self.root, "program.yaml")
+        with open(path, encoding="utf-8") as f:
+            prog = yaml.safe_load(f)
+        prog.setdefault("delivery", {})["platform"] = platform
+        wyaml(path, prog)
+
+    def package_with(self, fid, slug="freeze-consumes-window"):
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        pkg = os.path.join(self.root, "packages", fid, "hackenproof")
+        hashes = {n: sha(wfile(os.path.join(pkg, n), t.format(slug=slug)))
+                  for n, t in CLEAN_TEXTS.items()}
+        forge_out = wfile(os.path.join(self.root, "packages", fid,
+                                       "forge-test-output.txt"),
+                          "Ran 1 test\n[PASS] test_window (gas: 1)\nSuite result: ok\n")
+        fields = [
+            {"field": "title", "path": f"packages/{fid}/hackenproof/fields/1-title.txt",
+             "sha256": hashes["fields/1-title.txt"]},
+            {"field": "vulnerability_details",
+             "path": f"packages/{fid}/hackenproof/fields/2-vulnerability-details.md",
+             "sha256": hashes["fields/2-vulnerability-details.md"]},
+            {"field": "validation_steps",
+             "path": f"packages/{fid}/hackenproof/fields/3-validation-steps.md",
+             "sha256": hashes["fields/3-validation-steps.md"]},
+            {"field": "supporting_files",
+             "path": f"packages/{fid}/hackenproof/fields/4-supporting-files.txt",
+             "sha256": hashes["fields/4-supporting-files.txt"]},
+            {"field": "submission",
+             "path": f"packages/{fid}/hackenproof/submission.md",
+             "sha256": hashes["submission.md"]},
+        ]
+        mpath = os.path.join(self.root, "packages", fid, "manifest.yaml")
+        with open(mpath, encoding="utf-8") as f:
+            manifest = yaml.safe_load(f)
+        manifest["materials"] = {
+            "platform": "hackenproof", "slug": slug, "fields": fields,
+            "attachments": [
+                {"path": f"packages/{fid}/forge-test-output.txt",
+                 "sha256": sha(forge_out),
+                 "note": "verbatim forge output, also pasted in the validation field"}],
+        }
+        wyaml(mpath, manifest)
+
+    def packaged(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.package_with(fid)
+        self.advance(fid, "PACKAGED",
+                     f"clean-dir run passed; log at evidence/{fid}/clean-run.log")
+        return fid
+
+    def passing_lint_log(self, fid, name="lint-1.log"):
+        r = run(["lint", "--case-root", self.root, "--id", fid,
+                 "--save-log", f"evidence/{fid}/{name}"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return f"evidence/{fid}/{name}"
+
+    def correction(self, fid, *extra, code=0):
+        r = run(["record", "correction", "--case-root", self.root, "--id", fid,
+                 "--summary", "trim process narration; wording only, no technical change",
+                 *extra, "--expected-revision", self.revision(fid)])
+        self.assertEqual(r.returncode, code,
+                         f"rc={r.returncode}\nstdout={r.stdout}\nstderr={r.stderr}")
+        return r
+
+    def test_wording_correction_rebinds_hashes(self):
+        fid = self.packaged()
+        details_rel = f"packages/{fid}/hackenproof/fields/2-vulnerability-details.md"
+        wfile(os.path.join(self.root, details_rel),
+              CLEAN_TEXTS["fields/2-vulnerability-details.md"].replace(
+                  "rc", "rc, precisely stated"))
+        lint_log = self.passing_lint_log(fid)
+        self.correction(fid, "--files", details_rel, "--lint-log", lint_log)
+
+        fm = read_ledger(self.root, fid)
+        self.assertEqual(fm["revision"], len(fm["history"]))
+        self.assertEqual(len(fm["corrections"]), 1)
+        self.assertEqual(fm["corrections"][0]["files"], [details_rel])
+        manifest = yaml.safe_load(
+            open(os.path.join(self.root, "packages", fid, "manifest.yaml")))
+        entry = next(f_ for f_ in manifest["materials"]["fields"]
+                     if f_["path"] == details_rel)
+        self.assertEqual(entry["sha256"], sha(os.path.join(self.root, details_rel)))
+        # integrity holds after the rebind: resume reports no INVALID gates
+        r = run(["resume", "--case-root", self.root, "--id", fid, "--json"])
+        self.assertNotIn("INVALID", r.stdout)
+        # and the next stage still advances on the rebound inputs
+        zip_hash = sha(os.path.join(self.root, "packages", fid, "package.zip"))
+        self.build_self_review(fid, zip_hash)
+        self.advance(fid, "SELF_REVIEWED",
+                     f"independent rerun; log evidence/{fid}/self-rerun.log")
+
+    def test_correction_requires_passing_lint_log(self):
+        fid = self.packaged()
+        details_rel = f"packages/{fid}/hackenproof/fields/2-vulnerability-details.md"
+        wfile(os.path.join(self.root, details_rel),
+              CLEAN_TEXTS["fields/2-vulnerability-details.md"] +
+              "\nthis review corrected nothing\n")
+        r = run(["lint", "--case-root", self.root, "--id", fid,
+                 "--save-log", f"evidence/{fid}/lint-fail.log"])
+        self.assertEqual(r.returncode, 1)  # voice BLOCK
+        self.correction(fid, "--files", details_rel,
+                        "--lint-log", f"evidence/{fid}/lint-fail.log", code=2)
+
+    def test_tier2_path_rejected(self):
+        fid = self.packaged()
+        poc_rel = f"packages/{fid}/test/Exploit.t.sol"
+        lint_log = self.passing_lint_log(fid)
+        r = self.correction(fid, "--files", poc_rel, "--lint-log", lint_log, code=2)
+        self.assertIn("Tier 2", r.stdout + r.stderr)
+
+    def test_zip_member_change_forces_refresh(self):
+        fid = self.packaged()
+        report_rel = f"packages/{fid}/report.en.md"
+        report_p = os.path.join(self.root, report_rel)
+        wfile(report_p, "# Unsafe withdraw\n\ntightened wording, same facts\n")
+        lint_log = self.passing_lint_log(fid)
+        r = self.correction(fid, "--files", report_rel, "--lint-log", lint_log, code=2)
+        self.assertIn("zip", r.stdout + r.stderr)
+
+        # rebuild the zip with the new report, then the correction lands
+        pkg = os.path.join(self.root, "packages", fid)
+        with zipfile.ZipFile(os.path.join(pkg, "package.zip"), "w") as zf:
+            zf.write(report_p, "report.en.md")
+            zf.write(os.path.join(pkg, "test", "Exploit.t.sol"), "test/Exploit.t.sol")
+            zf.write(os.path.join(pkg, "lib", "util.sh"), "lib/util.sh")
+        lint_log = self.passing_lint_log(fid, "lint-2.log")
+        self.correction(fid, "--files", report_rel, "--lint-log", lint_log,
+                        "--zip-refreshed")
+        manifest = yaml.safe_load(open(os.path.join(pkg, "manifest.yaml")))
+        self.assertEqual(manifest["package"]["zip"]["sha256"],
+                         sha(os.path.join(pkg, "package.zip")))
+        r = run(["resume", "--case-root", self.root, "--id", fid, "--json"])
+        self.assertNotIn("INVALID", r.stdout)
+
+    def test_correction_after_review_needs_targeted_review(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.package_with(fid)
+        self.advance(fid, "PACKAGED",
+                     f"clean-dir run passed; log at evidence/{fid}/clean-run.log")
+        zip_hash = sha(os.path.join(self.root, "packages", fid, "package.zip"))
+        self.build_self_review(fid, zip_hash)
+        self.advance(fid, "SELF_REVIEWED",
+                     f"independent rerun; log evidence/{fid}/self-rerun.log")
+        details_rel = f"packages/{fid}/hackenproof/fields/2-vulnerability-details.md"
+        wfile(os.path.join(self.root, details_rel),
+              CLEAN_TEXTS["fields/2-vulnerability-details.md"].replace("rc", "rc, restated"))
+        lint_log = self.passing_lint_log(fid)
+        r = self.correction(fid, "--files", details_rel, "--lint-log", lint_log, code=2)
+        self.assertIn("targeted-review", r.stdout + r.stderr)
+        tr = wfile(self.evidence(fid, "targeted-review-1.md"),
+                   "independent reviewer: only the Root cause paragraph rewording "
+                   "was examined; no technical claim touched.\n")
+        self.correction(fid, "--files", details_rel, "--lint-log", lint_log,
+                        "--targeted-review", f"evidence/{fid}/targeted-review-1.md")
+        r = run(["resume", "--case-root", self.root, "--id", fid, "--json"])
+        self.assertNotIn("INVALID", r.stdout)
+
+    def test_correction_blocked_after_submission(self):
+        fid = self.packaged()
+        zip_hash = sha(os.path.join(self.root, "packages", fid, "package.zip"))
+        self.build_self_review(fid, zip_hash)
+        self.advance(fid, "SELF_REVIEWED",
+                     f"independent rerun; log evidence/{fid}/self-rerun.log")
+        self.build_submission(fid, zip_hash)
+        r = run(["record", "submission", "--case-root", self.root, "--id", fid,
+                 "--expected-revision", self.revision(fid)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.advance(fid, "SUBMITTED",
+                     f"receipt verified, channel PRIVATE; see evidence/{fid}/receipt.txt")
+        lint_log = self.passing_lint_log(fid)
+        self.correction(fid, "--files", f"packages/{fid}/hackenproof/fields/1-title.txt",
+                        "--lint-log", lint_log, code=2)
+
+
+class TestSelfReviewRounds(Base):
+    """The bounded multi-round review loop (workflow section 6)."""
+
+    def rounds_doc(self, fid, zip_hash, rounds):
+        wfile(self.evidence(fid, "self-rerun.log"), "independent rerun ok\nRESULT: PASS\n")
+        wyaml(self.evidence(fid, "self-review.yaml"), {
+            "reviewer": {"identity": "agent-2/session-xyz",
+                         "kind": "independent_agent"},
+            "package_sha256": "0x" + zip_hash,
+            "rounds": rounds,
+            "checks": {
+                "rerun": {"performed": True, "result": "PASS",
+                          "log_path": f"evidence/{fid}/self-rerun.log"},
+                "amounts": {"status": "VERIFIED", "notes": "matched run.log"},
+                "preconditions": {"status": "VERIFIED", "notes": "checked table"},
+                "wording": {"changes": []},
+            },
+            "adverse_facts": [],
+            "unresolved_objections": [],
+        })
+
+    def packaged_zip_hash(self, fid):
+        self.flow_to(fid, "PACKAGED")
+        return sha(os.path.join(self.root, "packages", fid, "package.zip"))
+
+    def test_two_round_loop_passes(self):
+        fid = self.register()
+        zip_hash = self.packaged_zip_hash(fid)
+        self.rounds_doc(fid, zip_hash, [
+            {"round": 1, "date": "2026-10-01",
+             "landing_check": {"of_round": None, "result": "N_A"},
+             "objections": [{"id": "P1", "verdict": "fixed",
+                             "note": "span corrected to closing brace"}],
+             "clean_round": False},
+            {"round": 2, "date": "2026-10-01",
+             "landing_check": {"of_round": 1, "result": "PASS"},
+             "objections": [{"id": "P2", "verdict": "kept_with_rationale",
+                             "note": "protocol-level statement; cases listed in Impact"}],
+             "clean_round": True},
+        ])
+        self.advance(fid, "SELF_REVIEWED",
+                     f"rounds landed clean; log evidence/{fid}/self-rerun.log")
+
+    def _loop_variants(self, rounds, needle):
+        fid = self.register()
+        zip_hash = self.packaged_zip_hash(fid)
+        self.rounds_doc(fid, zip_hash, rounds)
+        r = self.advance(fid, "SELF_REVIEWED",
+                         f"see evidence/{fid}/self-rerun.log", code=1)
+        self.assertIn(needle, r.stdout + r.stderr)
+
+    def test_final_round_must_be_clean(self):
+        self._loop_variants([
+            {"round": 1, "date": "2026-10-01",
+             "landing_check": {"of_round": None, "result": "N_A"},
+             "objections": [], "clean_round": True},
+            {"round": 2, "date": "2026-10-01",
+             "landing_check": {"of_round": 1, "result": "PASS"},
+             "objections": [], "clean_round": False},
+        ], "final round must be clean_round")
+
+    def test_fixes_in_final_round_are_not_clean(self):
+        self._loop_variants([
+            {"round": 1, "date": "2026-10-01",
+             "landing_check": {"of_round": None, "result": "N_A"},
+             "objections": [], "clean_round": True},
+            {"round": 2, "date": "2026-10-01",
+             "landing_check": {"of_round": 1, "result": "PASS"},
+             "objections": [{"id": "P1", "verdict": "fixed", "note": "x"}],
+             "clean_round": True},
+        ], "landing-verification round")
+
+    def test_landing_check_failure_blocks(self):
+        self._loop_variants([
+            {"round": 1, "date": "2026-10-01",
+             "landing_check": {"of_round": None, "result": "N_A"},
+             "objections": [], "clean_round": False},
+            {"round": 2, "date": "2026-10-01",
+             "landing_check": {"of_round": 1, "result": "FAIL"},
+             "objections": [], "clean_round": True},
+        ], "did not land")
+
+    def test_kept_objection_needs_note(self):
+        self._loop_variants([
+            {"round": 1, "date": "2026-10-01",
+             "landing_check": {"of_round": None, "result": "N_A"},
+             "objections": [{"id": "P1", "verdict": "kept_with_rationale",
+                             "note": ""}],
+             "clean_round": False},
+            {"round": 2, "date": "2026-10-01",
+             "landing_check": {"of_round": 1, "result": "PASS"},
+             "objections": [], "clean_round": True},
+        ], "kept_with_rationale")
+
+
+class TestFormTargetsAndAttachmentsExport(Base):
+    """materials.form_targets / materials.attachments end to end."""
+
+    def set_platform(self, platform):
+        path = os.path.join(self.root, "program.yaml")
+        with open(path, encoding="utf-8") as f:
+            prog = yaml.safe_load(f)
+        prog.setdefault("delivery", {})["platform"] = platform
+        wyaml(path, prog)
+
+    def test_form_targets_and_attachments_flow_to_export(self):
+        self.set_platform("hackenproof")
+        fid = self.register()
+        self.flow_to(fid, "TRIAGED")
+        self.build_package(fid)
+        pkg = os.path.join(self.root, "packages", fid, "hackenproof")
+        slug = "freeze-consumes-window"
+        hashes = {n: sha(wfile(os.path.join(pkg, n), t.format(slug=slug)))
+                  for n, t in CLEAN_TEXTS.items()}
+        forge_out = wfile(os.path.join(self.root, "packages", fid,
+                                       "forge-test-output.txt"),
+                          "[PASS] test_window (gas: 1)\n")
+        fields = [
+            {"field": "title", "path": f"packages/{fid}/hackenproof/fields/1-title.txt",
+             "sha256": hashes["fields/1-title.txt"]},
+            {"field": "vulnerability_details",
+             "path": f"packages/{fid}/hackenproof/fields/2-vulnerability-details.md",
+             "sha256": hashes["fields/2-vulnerability-details.md"]},
+            {"field": "validation_steps",
+             "path": f"packages/{fid}/hackenproof/fields/3-validation-steps.md",
+             "sha256": hashes["fields/3-validation-steps.md"]},
+            {"field": "supporting_files",
+             "path": f"packages/{fid}/hackenproof/fields/4-supporting-files.txt",
+             "sha256": hashes["fields/4-supporting-files.txt"]},
+            {"field": "submission",
+             "path": f"packages/{fid}/hackenproof/submission.md",
+             "sha256": hashes["submission.md"]},
+        ]
+        mpath = os.path.join(self.root, "packages", fid, "manifest.yaml")
+        with open(mpath, encoding="utf-8") as f:
+            manifest = yaml.safe_load(f)
+        manifest["materials"] = {
+            "platform": "hackenproof", "slug": slug, "fields": fields,
+            "form_targets": [
+                {"field": "Impacted contract", "address": TARGET_ADDR,
+                 "source": "PROVENANCE.md + registry snapshot at block 19000000"}],
+            "attachments": [
+                {"path": f"packages/{fid}/forge-test-output.txt",
+                 "sha256": sha(forge_out),
+                 "note": "verbatim forge output"}],
+        }
+        wyaml(mpath, manifest)
+        self.advance(fid, "PACKAGED",
+                     f"clean-dir run passed; log at evidence/{fid}/clean-run.log")
+
+        # a second finding held back at TRIAGED shows up in the not-exported ledger
+        fid2 = self.register(FINDING_SRC)
+        self.flow_to(fid2, "TRIAGED")
+
+        out = os.path.join(self.tmp, "submission")
+        r = run(["export", "--case-root", self.root, "--id", fid, "--out", out,
+                 "--readme"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = os.path.join(out, "01-" + slug + "-high")
+        self.assertTrue(os.path.isfile(os.path.join(d, "fields", "1-title.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(d, "forge-test-output.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(d, slug + "-poc-bundle.zip")))
+        readme = open(os.path.join(out, "README.md"), encoding="utf-8").read()
+        self.assertIn("form target", readme)
+        self.assertIn(TARGET_ADDR, readme)
+        self.assertIn("Not exported this run", readme)
+        self.assertIn(fid2, readme)
+        # attachment drift aborts the export
+        wfile(os.path.join(self.root, "packages", fid, "forge-test-output.txt"),
+              "tampered\n")
+        r = run(["export", "--case-root", self.root, "--id", fid, "--out", out])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("attachment", r.stderr)
 
 
 if __name__ == "__main__":

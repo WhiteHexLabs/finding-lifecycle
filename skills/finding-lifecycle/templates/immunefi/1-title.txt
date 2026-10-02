@@ -1,0 +1,7 @@
+One line, impact-first: what breaks, in which contract/function, and the stuck
+end-state — e.g. "Unconditional ExchangeRateDecreased revert in
+USDTelExchangeRate.setExchangeRate leaves no role able to publish a corrective
+lower rate — the oracle feed freezes at its last high value forever
+(ripcord-blocked rate)". Paste into the Immunefi Title field; the triager
+reads it first, no dramatization. This file must contain exactly that one
+line (this guidance is removed in the real material).

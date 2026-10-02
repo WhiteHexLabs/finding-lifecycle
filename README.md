@@ -49,6 +49,7 @@ under one parent per target program** — never a single shared root:
 └── case/                         # finding-lifecycle --case-root
     ├── imports/audit/<run-id>/   # immutable copies written by import-audit
     ├── ingest/ · findings/ · evidence/ · packages/
+    └── submission/               # `export` output: NN-<slug>-<SEVERITY>/ paste kits
 ```
 
 Why siblings and not one root: `import-audit` copies the evidence, so the
@@ -127,7 +128,38 @@ LC="python3 skills/finding-lifecycle/scripts/lifecycle.py"
 $LC import-audit --case-root <dir> --handoff <…>/handoff/manifest.yaml   # 0A
 $LC ingest    --case-root <dir>                                          # 0B
 $LC register  --case-root <dir> --from finding-source.yaml               # 0C
+$LC export    --case-root <dir> --id F-… [--id F-…]                      # materials
 ```
+
+Each finding keeps its PoC as a locally runnable project under
+`evidence/<id>/poc/` (re-verifiable with `forge test` even if never
+submitted). Platform submission materials are format-gated: when
+`program.yaml delivery.platform: immunefi`, PACKAGED also requires the
+three-file form kit `packages/<id>/immunefi/{1-title,2-description,
+3-poc}.txt` (required section headers enforced); with
+`delivery.platform: hackenproof` it requires the four-field kit
+`packages/<id>/hackenproof/fields/{1-title.txt,2-vulnerability-details.md,
+3-validation-steps.md,4-supporting-files.txt}` plus the full write-up
+`hackenproof/submission.md` (headers and the `Upload:` bundle line
+enforced). `export` assembles `submission/NN-<slug>-<SEVERITY>/` (field
+files + the attachment zip + declared attachments + README index with
+per-package form targets and a not-exported ledger) in the given
+submission-priority order — the HackenProof attachment is copied out as
+`<slug>-poc-bundle.zip`.
+
+Post-package quality loop (hardened after a real multi-round submission
+cycle): self-review is a **bounded loop of independent rounds** — each later
+round first landing-verifies the previous round's fixes, and the loop ends
+only on a clean round. `lint` is the post-edit regression battery over the
+report + form fields: address allowlist (wrong-address transcriptions have
+survived three review rounds), recipient-visible file references, platform
+form sections still present, and submission-facing voice (no review/process
+narration). Post-review edits are two-tier: wording fixes are journaled
+corrections (`record correction` — lint log, manifest hash refresh, gate
+input rebind); technical changes reopen PACKAGED for a new package version
+and a fresh independent review. Declaring "no published audits" in the
+prior-art gate requires two discovery channels plus an independent
+confirmation — absence is the most expensive claim to get wrong.
 
 Docs: `skills/finding-lifecycle/references/` (workflow, contracts, handoff
 contract). Demo: `demo/drive.py` (controlled local-chain exercise).

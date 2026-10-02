@@ -53,7 +53,16 @@ $LC check    --case-root <dir> --id F-…       # preview the next gate (read-on
 $LC advance  --case-root <dir> --id F-… --reviewer <who> \
              --reason "<substantive note citing an evidence path>" \
              --expected-revision N            # one stage per call
-$LC close|reopen|record|resume|index …        # dispositions, receipts, recovery
+$LC lint     --case-root <dir> --id F-… --save-log evidence/<id>/lint-<date>.log
+                                           # post-edit regression battery over the
+                                           # report + form fields; run after EVERY
+                                           # edit batch (contracts §9)
+$LC close|reopen|record|resume|index …    # dispositions, receipts, recovery
+$LC record correction --case-root <dir> --id F-… --summary … --files … \
+             --lint-log … [--zip-refreshed] [--targeted-review …] \
+             --expected-revision N          # Tier-1 wording fix after packaging
+$LC export --case-root <dir> --id F-… --id F-…  # material platforms: assemble
+                                               # submission/NN-<slug>-<SEV>/ for pasting
 ```
 
 Exit codes: `0` ok · `1` gate failed · `2` input/runtime error. Mutating
@@ -64,12 +73,12 @@ commands require the current `--expected-revision` (lost-update protection).
 | # | Stage | Produce | Gate essence |
 |---|-------|---------|--------------|
 | 0 | DISCOVERED | finding-source.yaml + prescreen | traceable source; duplication resolved; pre-screen recorded |
-| 1 | PRIOR_ART_CHECKED | prior-art.yaml + report copies | official docs site & program page searched; each audit report hashed locally + checked; MATCH ⇒ INELIGIBLE (or still_eligible with rule_ref); no audits must be declared |
+| 1 | PRIOR_ART_CHECKED | prior-art.yaml + report copies | official docs site & program page searched; each audit report hashed locally + checked; MATCH ⇒ INELIGIBLE (or still_eligible with rule_ref); declared "no audits" needs ≥2 channels + an independent confirmation |
 | 2 | CROSS_CHECKED | cross-check.yaml + assessment.md | explicit affected deployment set (addr + runtime code hash); refutation attempts; damage ≠ profit |
 | 3 | FORK_PROVEN | fork-proof.yaml + PoC + run.log | pinned fork; real addresses; assertions present in the log; PnL split (unknown stays unknown); cheatcodes justified |
 | 4 | TRIAGED | triage.yaml | severity == matrix entry; every eligibility item PASS/NOT_APPLICABLE (FAIL ⇒ close INELIGIBLE); novelty recorded; rules snapshot frozen |
-| 5 | PACKAGED | manifest.yaml + report.en.md + zip | clean-dir run `RESULT: PASS`; hashes; zip complete; secrets scan; pinned deps |
-| 6 | SELF_REVIEWED | self-review.yaml | independent session/agent; bound to final package hash; zero unresolved objections |
+| 5 | PACKAGED | manifest.yaml + report.en.md + zip | clean-dir run `RESULT: PASS`; hashes; zip complete; secrets scan; pinned deps; platform materials when `delivery.platform` names one (Immunefi: `immunefi/{1-title,2-description,3-poc}.txt`; HackenProof: `hackenproof/fields/{1..4}` + `submission.md`) |
+| 6 | SELF_REVIEWED | self-review.yaml | independent rounds until a clean round; next round landing-verifies the last; bound to final package hash; zero unresolved objections |
 | 7 | SUBMITTED | submission.yaml (record submission → advance) | receipt + PRIVATE channel + package hash + account limits |
 
 Dispositions (independent of stage): `OPEN MERGED INELIGIBLE REFUTED ACCEPTED
@@ -93,23 +102,39 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
   the audit workspace. Orchestrator output enters via 0A only — never
   0B-scan a directory that covers `audit/` (name-based discovery would
   scaffold a duplicate draft).
+- Every finding keeps its PoC as a runnable project under `evidence/<id>/poc/`
+  (foundry.toml, verified-source src/, test/, vendored lib/, run.log) —
+  re-verifiable locally with `forge test` even when the finding is never
+  submitted; packaging copies that tree verbatim into `packages/<id>/poc/`.
 - Run `resume` first when picking up any case; it reports blockers, invalid
   gates and rebuilds a broken index. `check` before every `advance`.
 - Modified PoC/report/targets/rules invalidate the affected gates and their
   successors → `reopen --affect-stage <stage>`, never hand-edits. Manual edits
-  never grant passage.
+  never grant passage. The one sanctioned exception: Tier-1 wording fixes over
+  the report/materials via `record correction` (lint log + rebind + journal;
+  contracts §10) — anything technical is Tier 2 (reopen, new package version,
+  fresh review).
 - Infrastructure failure (RPC down, missing deps, unclear rules) ⇒ `record
   blocker`, stay open. REFUTED needs fork counter-evidence + a conclusion
   boundary; INELIGIBLE is not "not a bug".
-- Report changes after review = new package version + new independent review;
-  submitted packages are never overwritten. "Generated" ≠ "submitted".
+- After PACKAGED, run `lint` after **every** edit batch to the report or form
+  fields: it re-checks the platform form contract (required sections), the
+  address allowlist, recipient-visible references and the submission-facing
+  voice — the four classes that regress under editing.
+- Report changes after review come in two tiers: wording/disclosure fixes are
+  journaled corrections (`record correction`); technical changes (address,
+  amount, PoC, severity, targets) are a new package version + new independent
+  review. Submitted packages are never overwritten. "Generated" ≠ "submitted".
 - Case roots hold no credentials, RPC keys or KYC documents.
 
 ## Repository layout
 
 `templates/` (program.yaml, finding, assessment, report.en, self-review,
-appeal, poc/setup_and_run.sh) · `references/` (workflow, contracts,
-handoff-contract) · `scripts/lifecycle.py` · `demo/` (controlled local-chain
+appeal, poc/setup_and_run.sh, immunefi/{1-title,2-description,3-poc}.txt,
+hackenproof/{fields/{1-title.txt,2-vulnerability-details.md,
+3-validation-steps.md,4-supporting-files.txt},submission.md}) ·
+`references/` (workflow, contracts, handoff-contract) ·
+`scripts/lifecycle.py` · `demo/` (controlled local-chain
 exercise: success + refutation samples driven end to end via
 `python3 demo/drive.py`) · `tests/` (behavioral tests at the repository
 root). Skill install never carries finding data; each target program lives

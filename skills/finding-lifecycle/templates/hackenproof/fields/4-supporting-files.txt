@@ -1,0 +1,17 @@
+Upload: <slug>-poc-bundle.zip (self-contained Foundry project, ~X MB).
+
+Bundle contents:
+- test/<PoC>.t.sol — the PoC (<N> tests)
+- src/ — explorer-verified target source (pinned at commit <hash>)
+- src/mocks/… — the stand-ins (name each)
+- lib/<deps>/ — dependency names + versions, vendored and pinned
+- foundry.toml / remappings.txt — solc <version> pinned, matching the target build
+- README.md — run instructions, real-vs-mocked map, expected result
+- forge-test-output.txt — verbatim forge test -vv output (<N> passed) on solc <version>
+- evidence/<on-chain evidence file> — <what it documents>, when present
+
+Run: unzip, cd <project-dir>, forge test -vv.
+
+(If files are uploaded beside the bundle, name them here exactly as uploaded
+and declare them in the manifest materials.attachments block. Describe only
+what the recipient receives — no workspace artifacts, no process statements.)
