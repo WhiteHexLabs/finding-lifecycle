@@ -528,7 +528,8 @@ def rpc_call(rpc_url: str, method: str, params: list, timeout: int):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
                        "params": params}).encode("utf-8")
     req = urllib.request.Request(rpc_url, data=body,
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": "contract-fetch/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             doc = json.loads(resp.read().decode("utf-8"))
@@ -805,7 +806,9 @@ def render_foundry_toml(entries: list) -> str:
         ]
         if c.get("via_ir"):
             lines.append("via_ir = true")
-        if c.get("evm_version"):
+        if c.get("evm_version") and str(c["evm_version"]).lower() != "default":
+            # "Default" is solc-json's null placeholder; forge config rejects it,
+            # so omit the line and let forge pick the compiler's default.
             lines.append(f"evm_version = {toml_str(c['evm_version'])}")
         if e.get("remappings"):
             rendered = ", ".join(toml_str(r) for r in e["remappings"])
@@ -1468,15 +1471,35 @@ def exact_input_bytecode(output: dict, contract_name: str):
     return None
 
 
+# solc metadata CBOR prefix: a2 | "d" "ipfs" | 58 22 | 1220 | <32-byte hash>
+_METADATA_BLOB_PREFIX = "a2646970667358221220"
+_DSOLC_HEX = "64736f6c63"
+
+
 def mask_metadata(code: str) -> str:
     """Zero the CBOR metadata tail (unit paths legitimately differ between the
     verified input and the reconstructed tree, so metadata hashes cannot be
     compared across the two compilations — code bytes can)."""
     tail = metadata_tail(code)
-    if tail is None:
-        return code
-    cut = len(tail)
-    return code[:-cut] + "00" * (cut // 2) if cut else code
+    if tail is not None and tail:
+        cut = len(tail)
+        code = code[:-cut] + "00" * (cut // 2)
+    # A runtime can also embed per-compile metadata hashes in its data region
+    # (compiled-in constants that carry a metadata blob of this unit set).
+    # Zero every embedded ipfs hash too — sanity-checked by the trailing
+    # "dsolc" marker — so only compile-stable bytes are compared.
+    out, i = [], 0
+    while True:
+        j = code.find(_METADATA_BLOB_PREFIX, i)
+        if j < 0:
+            out.append(code[i:])
+            break
+        hash_at = j + len(_METADATA_BLOB_PREFIX)
+        blob_ok = code.startswith(_DSOLC_HEX, hash_at + 64)
+        out.append(code[i:hash_at])
+        out.append("00" * 32 if blob_ok else code[hash_at:hash_at + 64])
+        i = hash_at + 64
+    return "".join(out)
 
 
 def artifact_path(root: str, batch: str, tid: str, contract_name: str) -> str:
