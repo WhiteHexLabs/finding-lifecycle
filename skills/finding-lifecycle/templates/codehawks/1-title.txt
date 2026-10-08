@@ -1,0 +1,5 @@
+One impact-first line naming the broken function and the end-state. Medium/
+High findings are submitted as individual reports on CodeHawks — this title
+is the whole report's first impression for community judging. This file
+must contain exactly that one line (this guidance is removed in the real
+material).

@@ -145,6 +145,17 @@ record submission --id F [--input P] --expected-revision N
 record response  --id F --decision ACCEPTED|REJECTED --evidence P [--reason T] --expected-revision N
 record appeal    --id F --status DRAFTED|SENT|RESOLVED [--deadline D] [--materials P...]
                   [--receipt P] [--outcome T] --expected-revision N
+export     --case-root D --id F [--id F ...] [--out DIR] [--readme]
+           read-only assembly of the paste-ready submission/ dir from PACKAGED
+           findings of a material platform: one NN-<slug>-<SEVERITY>/ per
+           finding (--id order = submission priority), field files in the
+           platform layout, the bundle zip under the platform's export name,
+           declared attachments, and a README index (form targets, hashes,
+           withheld TRIAGED+ findings). Material and zip hashes are re-verified
+           against the frozen manifest — drift aborts. Platforms with an
+           individual-submission severity vocabulary (code4rena, codehawks,
+           sherlock, cantina) refuse out-of-vocabulary severities; consolidated
+           QA/Gas/Low reports are assembled outside export.
 ```
 
 Exit codes: `0` success · `1` gate not passed · `2` input/runtime error
@@ -253,7 +264,7 @@ Checks:
 |---|---|---|
 | `addr` | BLOCK | every `0x…` 40-hex address in the texts must be a cross-check target (`targets[].address/proxy_address/implementation_address`), a program scope target, a declared `materials.form_targets[].address`, or allowlisted with a reason |
 | `attachment` | BLOCK | every file-like reference (`.txt .md .log .json .zip .pdf .sh .toml .yaml .yml .sol`) must resolve into the attachment set: package-zip members, `materials.attachments[]` entries, the exported bundle name, or the material files themselves |
-| `sections` | BLOCK | every platform-required section header and the `Upload:` line still present in the field files (the "rewrite deleted the run instructions" regression) |
+| `sections` | BLOCK | every platform-required section header and the `Upload:` line still present in the field files (the "rewrite deleted the run instructions" regression); on platforms with `permalink_fields` (Sherlock), every github.com reference still a commit-pinned permalink (`/blob/<40-hex>/…#L…`) — branch links can be altered after submission |
 | `voice` | BLOCK | internal/process vocabulary in submission-facing text: internal finding ids (`F-<32hex>`), review-round/correction narration ("this review", "previous round", "corrected", "synchronized"), workspace-local phrasing |
 | `universal` | WARN | universal claims ("never happened", "not identified in any", "in all production", "every withdrawal") that must cite the per-report prior-art NO_MATCH entries or a source-derivation |
 
@@ -315,3 +326,12 @@ materials:
 `form_targets` answers the form-dropdown question at export time (the export
 README lists them per package); `attachments` extend the lint attachment set
 and are copied into the export directory alongside the bundle zip.
+
+Six platforms have built-in material specs — immunefi, hackenproof,
+code4rena, codehawks, sherlock, cantina (formats, per-platform PoC bars and
+severity vocabularies: references/platform-standards.md). Two platform rules
+are enforced mechanically in addition to headers/paths: Sherlock's
+`permalink_fields` (every github.com reference in the issue body must be a
+commit-pinned permalink) and the contest platforms' `severity_levels`
+(`export` refuses a `severity.final` that is not an individual-submission
+level — consolidated QA/Gas/Low reports live outside export).

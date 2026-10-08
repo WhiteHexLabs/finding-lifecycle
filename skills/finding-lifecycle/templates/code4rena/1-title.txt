@@ -1,0 +1,5 @@
+One impact-first line naming the broken function and the end-state — e.g.
+"Incorrect reward accounting in RewardDistributor.claim() lets any staker
+drain the unclaimed pool". Judges read the title against the risk category
+before opening the body. This file must contain exactly that one line (this
+guidance is removed in the real material).

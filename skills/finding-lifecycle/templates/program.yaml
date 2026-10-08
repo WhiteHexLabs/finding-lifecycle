@@ -73,14 +73,18 @@ submission_limits:
   timezone: UTC
 
 delivery:
-  # Platform with a fixed web-form material format. 'immunefi' makes the
-  # PACKAGED gate require packages/<id>/immunefi/{1-title,2-description,
-  # 3-poc}.txt (templates/immunefi/); 'hackenproof' requires packages/<id>/
-  # hackenproof/fields/{1-title.txt,2-vulnerability-details.md,
-  # 3-validation-steps.md,4-supporting-files.txt} plus submission.md
-  # (templates/hackenproof/); both enable `lifecycle.py export`;
-  # 'other' = free-format delivery, no material gate.
-  platform: immunefi           # immunefi | hackenproof | other | null (unset)
+  # Platform with a fixed web-form material format; it makes the PACKAGED
+  # gate require packages/<id>/<platform>/… and enables `lifecycle.py
+  # export`. Built in: 'immunefi' ({1-title,2-description,3-poc}.txt),
+  # 'hackenproof' (fields/{1..4} + submission.md), 'code4rena' /
+  # 'codehawks' (1-title.txt + 2-finding.md; individual High/Medium
+  # findings only — QA/Gas/Low consolidate outside export), 'sherlock'
+  # (1-title.txt + 2-issue-body.md; github references must be commit-pinned
+  # permalinks), 'cantina' (1-title.txt + 2-description.md; High/Medium
+  # need a coded PoC). See templates/<platform>/ and
+  # references/platform-standards.md. 'other' = free-format delivery, no
+  # material gate.
+  platform: immunefi           # immunefi | hackenproof | code4rena | codehawks | sherlock | cantina | other | null (unset)
   language: en
   fields: [summary, severity, root cause, PoC, impact]
   attachments: "zip PoC package via private attachment only"

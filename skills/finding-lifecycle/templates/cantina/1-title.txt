@@ -1,0 +1,6 @@
+One concise line naming the broken function and the end-state. Cantina's
+form pairs this title with the Severity dropdown you select manually —
+make the title match that severity, not overstate it (admin-only issues
+cap at Low; weird-ERC20 and rounding/dust losses cap at Low). This file
+must contain exactly that one line (this guidance is removed in the real
+material).

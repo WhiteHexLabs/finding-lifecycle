@@ -1,7 +1,8 @@
 # Workflow — the eight stages in practice
 
 Operating manual. State/gate contracts: references/contracts.md; the audit
-handoff interface: references/handoff-contract.md. Two red lines
+handoff interface: references/handoff-contract.md; per-platform formats,
+PoC bars and rejection causes: references/platform-standards.md. Two red lines
 apply at every stage: **never modify target protocol code** (fix ideas go into
 the report's remediation attachment only; PoCs use separate attack contracts)
 and **never disclose publicly** (controlled private channels only).
@@ -301,7 +302,9 @@ exceptions must match actual findings (a legit tx hash will trip
 
 When `program.yaml delivery.platform` names a material platform, the package
 also carries the web-form field files the platform expects, and the PACKAGED
-gate refuses to pass without them. Two formats are built in.
+gate refuses to pass without them. Six formats are built in; per-platform
+quality bars, severity vocabularies and rejection causes live in
+references/platform-standards.md.
 
 **Immunefi** (`delivery.platform: immunefi`) — three flat txt files, one per
 form field (templates/immunefi/):
@@ -342,13 +345,56 @@ a `fields/` subdirectory plus the standalone full write-up
   `# Finding <n> - <title>`, plus a `## Reproduction` section (unzip the
   bundle, `forge test -vv`, captured output).
 
+**Code4rena** (`delivery.platform: code4rena`) — two files
+(templates/code4rena/); individual High/Medium findings only — QA and Gas
+go into one consolidated report per warden, assembled outside export:
+
+- `packages/<id>/code4rena/1-title.txt` — one impact-first line → Title.
+- `packages/<id>/code4rena/2-finding.md` — the finding body; must contain
+  `## Impact`, `## Proof of Concept` (the coded PoC: test diff, run
+  command, verbatim output; a reverting PoC prints the exact revert
+  error), `## Recommended Mitigation Steps`. `export` refuses severities
+  outside high/medium.
+
+**CodeHawks** (`delivery.platform: codehawks`) — two files
+(templates/codehawks/); Medium/High are individual reports, Lows are
+consolidated (export refuses them):
+
+- `packages/<id>/codehawks/1-title.txt` — one impact-first line → Title.
+- `packages/<id>/codehawks/2-finding.md` — the report body, verbatim
+  template: `## Summary`, `## Vulnerability Details`, `## Impact`,
+  `## Tools Used`, `## Recommended Mitigation`. PoC: executable test with
+  line-by-line comments and explicit `// Attacker: / Victim: / Protocol:`
+  roles, or the Initial State → steps → Outcome → Implications scenario.
+
+**Sherlock** (`delivery.platform: sherlock`) — two files
+(templates/sherlock/); one GitHub Issue per finding labeled Medium/High:
+
+- `packages/<id>/sherlock/1-title.txt` — the issue title.
+- `packages/<id>/sherlock/2-issue-body.md` — the Audit Item body; must
+  contain `## Issue`, `## Impact`, `## Attack path`, `## PoC`, and every
+  `github.com` reference must be a commit-pinned permalink
+  (`/blob/<40-hex>/…#L…`) — the gate and `lint` both reject branch links
+  (code references that can be altered after submission). Enumerate every
+  trigger condition; likelihood never argues severity.
+
+**Cantina** (`delivery.platform: cantina`) — two files (templates/cantina/):
+
+- `packages/<id>/cantina/1-title.txt` — one concise line → Title; select
+  the Severity in the form yourself.
+- `packages/<id>/cantina/2-description.md` — the Description field; must
+  contain `## Root cause`, `## PoC` (the coded PoC: test file, run
+  command, actual vs expected output — H/M submissions without a
+  compiling, impact-demonstrating PoC get downgraded or invalidated),
+  `## Impact`.
+
 They live beside `package.zip` (not inside it), and are declared in the same
 `manifest.yaml` under a top-level `materials` block (hash-bound like
 everything else — editing them after review invalidates the gate):
 
 ```yaml
 materials:
-  platform: hackenproof        # or immunefi
+  platform: hackenproof        # or immunefi | code4rena | codehawks | sherlock | cantina
   slug: fast-withdrawal-zero-signer   # short lowercase slug; names the export dir
   fields:
     - {field: title,               path: packages/<id>/hackenproof/fields/1-title.txt, sha256: <64hex>}
@@ -529,11 +575,17 @@ lc export --case-root <dir> --id F-… --out <dir>     # elsewhere (e.g. a priva
 
 Each `submission/NN-<slug>-<SEVERITY>/` gets the field files in their
 platform layout (Immunefi: the three txt files flat; HackenProof:
-`fields/{1..4}` plus `submission.md`) with hashes re-verified against the
+`fields/{1..4}` plus `submission.md`; Code4rena/CodeHawks: `1-title.txt` +
+`2-finding.md`; Sherlock: `1-title.txt` + `2-issue-body.md`; Cantina:
+`1-title.txt` + `2-description.md`) with hashes re-verified against the
 frozen manifest — drifted materials abort the export; reopen PACKAGED
 instead — plus the attachment zip (Immunefi: `package.zip`; HackenProof:
 copied out as `<slug>-poc-bundle.zip`, the name the Supporting files field's
-`Upload:` line quotes) and any declared `materials.attachments`. A `README.md`
+`Upload:` line quotes; the four contest platforms: `<slug>-poc.zip`) and any
+declared `materials.attachments`. Platforms with an individual-submission
+severity vocabulary refuse out-of-vocabulary severities (e.g. a QA-level
+finding on Code4rena) — consolidated QA/Gas/Low reports are assembled by
+hand from the findings `export` leaves out. A `README.md`
 index is written once (`--readme` regenerates): per-package form targets
 (which contract to select in each form field, from `materials.form_targets`),
 zip hashes, and a "not exported" section listing every TRIAGED+ finding left
@@ -592,9 +644,14 @@ EVM + Foundry fork only; entry-point agnostic (any audit output that yields a
 claim + targets works). This skill never executes audits — the sibling
 `audit-orchestrator` skill runs configured audit skills and hands over a
 finalized bundle (§0A). Material platforms are built in with fixed form
-formats — Immunefi's three-file kit (`delivery.platform: immunefi`) and
+formats — Immunefi's three-file kit (`delivery.platform: immunefi`),
 HackenProof's fields/ four-field kit plus full write-up
-(`delivery.platform: hackenproof`); other platforms use free-format
-delivery. No database, no web UI, no auditor-plugin system, no
-auto-submission service, no secret gists — delivery goes
+(`delivery.platform: hackenproof`), and the four contest platforms
+Code4rena / CodeHawks / Sherlock / Cantina (title + one markdown body each;
+individual High/Medium findings only); per-platform standards live in
+references/platform-standards.md; other platforms use free-format
+delivery. Consolidated QA/Gas/Low reports (C4/Sherlock/CodeHawks) and
+Remedy/Hats formats are documented boundaries of this version — assembled
+by hand, not by export. No database, no web UI, no auditor-plugin system,
+no auto-submission service, no secret gists — delivery goes
 through private repositories and platform-private attachments only.

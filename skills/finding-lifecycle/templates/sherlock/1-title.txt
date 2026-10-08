@@ -1,0 +1,5 @@
+One impact-first line naming the broken function and the end-state — this
+is the GitHub Issue title in the private contest repo. Remember to label
+the issue Medium or High; the label IS the severity claim. This file must
+contain exactly that one line (this guidance is removed in the real
+material).

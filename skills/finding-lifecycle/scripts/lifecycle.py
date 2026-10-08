@@ -118,9 +118,11 @@ STAGE_HINTS = {
         "write one English report per root cause; assemble the self-contained PoC package",
         "run the package in a clean directory; save the log containing RESULT: PASS",
         "run the secrets scan; pin dependencies; write packages/{fid}/manifest.yaml",
-        "if program.yaml delivery.platform names a material platform (immunefi, "
-        "hackenproof): write packages/{fid}/<platform>/ form-field files "
-        "(templates/immunefi/, templates/hackenproof/) and declare them in the "
+        "if program.yaml delivery.platform names a material platform "
+        "(immunefi, hackenproof, code4rena, codehawks, sherlock, cantina): "
+        "write packages/{fid}/<platform>/ form-field files "
+        "(templates/<platform>/; formats and PoC bars in "
+        "references/platform-standards.md) and declare them in the "
         "manifest materials block",
     ],
     "SELF_REVIEWED": [
@@ -150,7 +152,13 @@ SECRET_PATTERNS = [
 # packages/<id>/<platform>/, plus the mechanical content anchors (required
 # section headers; `upload_line` = must carry an "Upload: <file>" line naming
 # the attached bundle). `zip_name` is the exported attachment filename
-# ("{slug}" expands to materials.slug).
+# ("{slug}" expands to materials.slug). Optional spec keys:
+# `severity_levels` — the platform's individual-submission severity levels;
+# `export` refuses severities outside this set (consolidated-report levels
+# like CodeHawks Low or C4 QA/Gas are assembled outside export).
+# `permalink_fields` — field names where every github.com URL must be a
+# commit-pinned permalink (github.com/<org>/<repo>/(blob|tree)/<40hex>/…),
+# the contest-judging requirement that code references cannot be altered.
 MATERIAL_SPECS = {
     # Immunefi three-file format (Aera/DAWN layout): one txt per web-form
     # field, pasted manually.
@@ -184,6 +192,61 @@ MATERIAL_SPECS = {
             "submission": {"path": "submission.md", "headers": ["## Reproduction"]},
         },
     },
+    # Code4rena contest submission: the website form takes one markdown body
+    # per High/Medium finding; a runnable coded PoC is required by default.
+    # QA and Gas findings are consolidated into one report per warden and
+    # are assembled outside export (references/platform-standards.md).
+    "code4rena": {
+        "zip_name": "{slug}-poc.zip",
+        "severity_levels": {"high", "medium"},
+        "fields": {
+            "title": {"path": "1-title.txt"},
+            "details": {"path": "2-finding.md", "headers": [
+                "## Impact", "## Proof of Concept",
+                "## Recommended Mitigation Steps"]},
+        },
+    },
+    # CodeHawks (Cyfrin) contest submission: web form, markdown template
+    # verbatim from their "How to Write and Submit a Finding" docs; Medium/
+    # High are individual reports, Low findings are consolidated separately.
+    "codehawks": {
+        "zip_name": "{slug}-poc.zip",
+        "severity_levels": {"high", "medium"},
+        "fields": {
+            "title": {"path": "1-title.txt"},
+            "details": {"path": "2-finding.md", "headers": [
+                "## Summary", "## Vulnerability Details", "## Impact",
+                "## Tools Used", "## Recommended Mitigation"]},
+        },
+    },
+    # Sherlock contest submission: one GitHub Issue per finding in the
+    # private contest repo. The house headers below guarantee the judging
+    # inputs (issue, impact, attack path, PoC); the actual Audit Item issue
+    # template of the live contest wins if it differs. Code references must
+    # be commit-pinned permalinks — judges explicitly guard against
+    # branch-link source swapping.
+    "sherlock": {
+        "zip_name": "{slug}-poc.zip",
+        "severity_levels": {"high", "medium"},
+        "permalink_fields": {"issue_body"},
+        "fields": {
+            "title": {"path": "1-title.txt"},
+            "issue_body": {"path": "2-issue-body.md", "headers": [
+                "## Issue", "## Impact", "## Attack path", "## PoC"]},
+        },
+    },
+    # Cantina competition submission: web form with Title + Description
+    # (cause, effects, PoC/supporting material); High/Medium submissions
+    # require a coded PoC that compiles and demonstrates the impact.
+    "cantina": {
+        "zip_name": "{slug}-poc.zip",
+        "severity_levels": {"critical", "high", "medium", "low"},
+        "fields": {
+            "title": {"path": "1-title.txt"},
+            "description": {"path": "2-description.md", "headers": [
+                "## Root cause", "## PoC", "## Impact"]},
+        },
+    },
 }
 MATERIAL_PLATFORMS = set(MATERIAL_SPECS)
 
@@ -211,9 +274,44 @@ EXPORT_README_FIELDS = {
         "- `<slug>-poc-bundle.zip` — the uploaded bundle (self-contained Foundry PoC "
         "project; hash recorded per package below)",
     ],
+    "code4rena": [
+        "- `1-title.txt` — paste into the Title field (one impact-first line)",
+        "- `2-finding.md` — paste into the finding Details body "
+        "(`## Impact`, `## Proof of Concept`, `## Recommended Mitigation Steps`); "
+        "High/Medium needs the coded PoC inside the Proof of Concept section",
+        "- `<slug>-poc.zip` — the PoC bundle when the form accepts an attachment; "
+        "otherwise embed/link it per the contest rules (hash recorded per package below)",
+    ],
+    "codehawks": [
+        "- `1-title.txt` — paste into the Title field (one impact-first line)",
+        "- `2-finding.md` — paste into the Report body "
+        "(`## Summary`, `## Vulnerability Details`, `## Impact`, `## Tools Used`, "
+        "`## Recommended Mitigation`); Medium/High are individual submissions",
+        "- `<slug>-poc.zip` — the PoC bundle (hash recorded per package below)",
+    ],
+    "sherlock": [
+        "- `1-title.txt` — the GitHub Issue title; label the issue Medium or High",
+        "- `2-issue-body.md` — the Audit Item issue body "
+        "(`## Issue`, `## Impact`, `## Attack path`, `## PoC`); every github.com "
+        "code reference must be a commit-pinned permalink",
+        "- `<slug>-poc.zip` — the PoC bundle referenced from the body (inline PoC "
+        "code in the issue is also acceptable; hash recorded per package below)",
+    ],
+    "cantina": [
+        "- `1-title.txt` — paste into the Title field (one impact-first line)",
+        "- `2-description.md` — paste into the Description field "
+        "(`## Root cause`, `## PoC`, `## Impact`); select the matching Severity "
+        "in the form — High/Medium require the coded PoC to compile and show impact",
+        "- `<slug>-poc.zip` — the PoC bundle (hash recorded per package below)",
+    ],
 }
 UPLOAD_LINE_RE = re.compile(r"(?m)^Upload: \S")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}[a-z0-9]$")
+GITHUB_URL_RE = re.compile(r"(?i)https?://(?:www\.)?github\.com/[^\s<>\"']+")
+# A commit-pinned permalink: github.com/<org>/<repo>/(blob|tree)/<7-40 hex>/…
+GITHUB_PERMALINK_RE = re.compile(
+    r"(?i)^https?://(?:www\.)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
+    r"(?:blob|tree)/[0-9a-f]{7,40}/[^\s]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -1315,6 +1413,16 @@ def verify_materials(ctx: Ctx, manifest_rel: str, materials) -> list:
             ctx.issue("incomplete",
                       f"material {name} ({rel}) must name the uploaded bundle in an "
                       "'Upload: <file>' line")
+        if name in (spec.get("permalink_fields") or ()):
+            for m in GITHUB_URL_RE.finditer(text):
+                url = m.group(0).rstrip(".,;:)")
+                if GITHUB_PERMALINK_RE.fullmatch(url):
+                    continue
+                ctx.issue("incomplete",
+                          f"material {name} ({rel}) cites {url!r} — every github.com "
+                          "reference must be a commit-pinned permalink "
+                          "(github.com/<org>/<repo>/blob/<40-hex>/…#L…); branch links "
+                          "can be altered after submission")
 
     # which contract to pick in each platform form field (dropdown answers,
     # verified against an authoritative source; surfaced by export)
@@ -1697,6 +1805,20 @@ def lint_finding(root: str, doc: dict, program: dict) -> dict:
             if fspec.get("upload_line") and text and not UPLOAD_LINE_RE.search(text):
                 add("sections", "BLOCK", rel, 0,
                     f"the 'Upload: <file>' line naming the bundle is missing ({name} field)")
+            if name in (spec.get("permalink_fields") or ()):
+                for m in GITHUB_URL_RE.finditer(text):
+                    url = m.group(0).rstrip(".,;:)")
+                    if GITHUB_PERMALINK_RE.fullmatch(url):
+                        continue
+                    ln = line_of(text, m.start())
+                    lines = text.splitlines()
+                    line_text = lines[ln - 1] if lines else ""
+                    if _allowlisted(allowlist, "sections", rel, url, line_text):
+                        continue
+                    add("sections", "BLOCK", rel, ln,
+                        f"github reference {url!r} is not a commit-pinned permalink "
+                        f"({name} field) — contest judging requires "
+                        "github.com/<org>/<repo>/blob/<40-hex>/…#L…")
 
     # voice: submission-facing text states findings, not its own history
     for rel, _label in surfaces:
@@ -2820,6 +2942,13 @@ def cmd_export(a) -> int:
         severity = (doc.get("severity") or {}).get("final")
         if not isinstance(severity, str) or not severity.strip():
             raise LifecycleError(f"{fid}: severity.final is unset — TRIAGED must precede export")
+        levels = MATERIAL_SPECS[plat].get("severity_levels")
+        if levels and severity.lower() not in levels:
+            raise LifecycleError(
+                f"{fid}: severity.final {severity!r} is not an individual-submission "
+                f"severity on {plat!r} (accepted: {', '.join(sorted(levels))}); "
+                "consolidated-report levels (QA/Gas/Low) are assembled outside export "
+                "— see references/platform-standards.md")
         dirname = f"{i:02d}-{slug}-{severity.lower()}"
         plan.append((i, dirname, fid, doc, manifest))
 

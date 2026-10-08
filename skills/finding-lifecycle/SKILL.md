@@ -77,7 +77,7 @@ commands require the current `--expected-revision` (lost-update protection).
 | 2 | CROSS_CHECKED | cross-check.yaml + assessment.md | explicit affected deployment set (addr + runtime code hash); refutation attempts; damage ≠ profit |
 | 3 | FORK_PROVEN | fork-proof.yaml + PoC + run.log | pinned fork; real addresses; assertions present in the log; PnL split (unknown stays unknown); cheatcodes justified |
 | 4 | TRIAGED | triage.yaml | severity == matrix entry; every eligibility item PASS/NOT_APPLICABLE (FAIL ⇒ close INELIGIBLE); novelty recorded; rules snapshot frozen |
-| 5 | PACKAGED | manifest.yaml + report.en.md + zip | clean-dir run `RESULT: PASS`; hashes; zip complete; secrets scan; pinned deps; platform materials when `delivery.platform` names one (Immunefi: `immunefi/{1-title,2-description,3-poc}.txt`; HackenProof: `hackenproof/fields/{1..4}` + `submission.md`) |
+| 5 | PACKAGED | manifest.yaml + report.en.md + zip | clean-dir run `RESULT: PASS`; hashes; zip complete; secrets scan; pinned deps; platform materials when `delivery.platform` names one (Immunefi: `immunefi/{1-title,2-description,3-poc}.txt`; HackenProof: `hackenproof/fields/{1..4}` + `submission.md`; Code4rena/CodeHawks/Sherlock/Cantina: `1-title.txt` + one markdown body — see `references/platform-standards.md` for formats, PoC bars and severity vocabularies) |
 | 6 | SELF_REVIEWED | self-review.yaml | independent rounds until a clean round; next round landing-verifies the last; bound to final package hash; zero unresolved objections |
 | 7 | SUBMITTED | submission.yaml (record submission → advance) | receipt + PRIVATE channel + package hash + account limits |
 
@@ -132,8 +132,9 @@ REJECTED WITHDRAWN`; appeals: `NONE → DRAFTED → SENT → RESOLVED`.
 `templates/` (program.yaml, finding, assessment, report.en, self-review,
 appeal, poc/setup_and_run.sh, immunefi/{1-title,2-description,3-poc}.txt,
 hackenproof/{fields/{1-title.txt,2-vulnerability-details.md,
-3-validation-steps.md,4-supporting-files.txt},submission.md}) ·
-`references/` (workflow, contracts, handoff-contract) ·
+3-validation-steps.md,4-supporting-files.txt},submission.md},
+code4rena|codehawks|sherlock|cantina/{1-title.txt,2-*.md}) ·
+`references/` (workflow, contracts, handoff-contract, platform-standards) ·
 `scripts/lifecycle.py` · `demo/` (controlled local-chain
 exercise: success + refutation samples driven end to end via
 `python3 demo/drive.py`) · `tests/` (behavioral tests at the repository
