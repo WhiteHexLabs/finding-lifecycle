@@ -1,5 +1,5 @@
-"""End-to-end integration: audit-orchestrator -> finalized handoff ->
-finding-lifecycle import -> registered DISCOVERED finding (plan.md section 58).
+"""End-to-end integration within the merged skill: audit.py -> finalized
+handoff -> lifecycle.py import -> registered DISCOVERED finding.
 
 Covers a configurable-output skill (writes into steps/<N>/work/) and a
 fixed-output skill (writes only to its own directory), canonical artifact
@@ -17,9 +17,9 @@ import unittest
 import yaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-AUDIT = os.path.join(REPO, "skills", "audit-orchestrator", "scripts", "audit.py")
-LC = os.path.join(REPO, "skills", "finding-lifecycle", "scripts", "lifecycle.py")
-TEMPLATES = os.path.join(REPO, "skills", "finding-lifecycle", "templates")
+AUDIT = os.path.join(REPO, "skills", "audit-lifecycle", "scripts", "audit.py")
+LC = os.path.join(REPO, "skills", "audit-lifecycle", "scripts", "lifecycle.py")
+TEMPLATES = os.path.join(REPO, "skills", "audit-lifecycle", "templates")
 
 CANDIDATE_SCHEMA = "whitehexlabs.audit-candidate/v1"
 ANALYSIS_SECTIONS = [
@@ -234,8 +234,10 @@ class TestAuditToLifecycle(unittest.TestCase):
                   "--rules-snapshot", rules])
         self.assertEqual(r.returncode, 0, r.stderr)
 
-        # 18. import-audit
-        r = lrun(["import-audit", "--case-root", case, "--handoff", handoff,
+        # 18. import-audit via work-root auto-discovery (the canonical glue:
+        # finalize → import with no hand-written manifest path); the explicit
+        # --handoff path is covered by tests/audit_lifecycle/test_import_audit.py
+        r = lrun(["import-audit", "--case-root", case, "--work-root", work,
                   "--json"])
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
@@ -288,7 +290,7 @@ class TestAuditToLifecycle(unittest.TestCase):
         fm = yaml.safe_load("\n".join(lines[1:end]))
         self.assertEqual(fm["stage"], "DISCOVERED")
         self.assertEqual(fm["disposition"], "OPEN")
-        self.assertEqual(fm["sources"]["auditor"], "audit-orchestrator")
+        self.assertEqual(fm["sources"]["auditor"], "audit-lifecycle")
         self.assertEqual(fm["sources"]["original_finding_id"], "A-001")
         self.assertEqual(fm["sources"]["audit_round"], rid)
 

@@ -84,7 +84,7 @@ target is READY. Resolve blockers by excluding the row in the targets file
 **with an `exclude_reason`** (excluded rows never fetch and never block) or
 fixing the row — never by editing evidence.
 
-## 6. Hand off to audit-orchestrator
+## 6. Hand off to audit-lifecycle (audit half)
 
 One work-root per READY target (keeps the orchestrator's target-modification
 guard scoped, and its `audit-skills.yaml` needs a single `target_root`):

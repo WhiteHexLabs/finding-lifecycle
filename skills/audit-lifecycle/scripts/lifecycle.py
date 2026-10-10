@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""finding-lifecycle CLI.
+"""audit-lifecycle CLI — the finding-lifecycle half.
 
 Post-audit lifecycle for smart-contract vulnerability findings: a
 Markdown ledger per finding is the single source of truth; this tool only
 performs validated, locked, atomic, revision-checked transitions.
 
-This skill never executes audit skills. Findings enter through:
-  0A. `import-audit` — a finalized audit-orchestrator handoff bundle
+This half never executes audit skills — that is the audit half of this
+skill (scripts/audit.py). Findings enter through:
+  0A. `import-audit` — a finalized handoff bundle from audit.py
   0B. `ingest`       — name-based discovery of arbitrary audit artifacts
   0C. `register`     — a manually authored finding-source.yaml
 
@@ -22,14 +23,11 @@ Design contracts (see references/contracts.md):
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import shutil
 import sys
-import tempfile
-import time
 import uuid
 import zipfile
 from datetime import date, datetime, timezone
@@ -39,6 +37,28 @@ try:
 except ImportError:  # pragma: no cover
     print("lifecycle.py requires PyYAML", file=sys.stderr)
     sys.exit(2)
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:  # direct execution from any cwd
+    sys.path.insert(0, _HERE)
+
+from _kernel import (  # noqa: E402  (shared kernel, same directory)
+    DirectoryLock,
+    GateFailure,
+    ToolError,
+    as_dict,
+    as_list,
+    as_str,
+    atomic_write,
+    check_enum,
+    emit,
+    load_yaml_file,
+    now_iso,
+    restrict_keys,
+    sha256_bytes,
+    sha256_file,
+    tree_digest,
+)
 
 # ---------------------------------------------------------------------------
 # constants
@@ -317,57 +337,13 @@ GITHUB_PERMALINK_RE = re.compile(
 # ---------------------------------------------------------------------------
 # errors and small utilities
 
-class LifecycleError(Exception):
+class LifecycleError(ToolError):
     """Input or runtime error -> exit 2."""
-
-
-class GateFailure(Exception):
-    """Gate not passed -> exit 1."""
-
-    def __init__(self, gate_id, issues, next_steps=()):
-        super().__init__(gate_id)
-        self.gate_id = gate_id
-        self.issues = list(issues)
-        self.next_steps = list(next_steps)
-
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def field_hash(value) -> str:
     canonical = json.dumps(value, sort_keys=True, ensure_ascii=True, default=str)
     return sha256_bytes(canonical.encode("utf-8"))
-
-
-def atomic_write(path: str, data: str) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".tmp-", suffix=".lifecycle")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def safe_rel(root: str, rel, what="path") -> str:
@@ -401,36 +377,6 @@ def parse_date(value, what) -> date:
         raise LifecycleError(f"{what}: not an ISO date: {value!r}")
 
 
-def as_dict(value, what) -> dict:
-    if not isinstance(value, dict):
-        raise LifecycleError(f"{what}: expected a mapping, got {type(value).__name__}")
-    return value
-
-
-def as_list(value, what) -> list:
-    if not isinstance(value, list):
-        raise LifecycleError(f"{what}: expected a list, got {type(value).__name__}")
-    return value
-
-
-def as_str(value, what) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise LifecycleError(f"{what}: expected a non-empty string")
-    return value
-
-
-def check_enum(value, allowed, what):
-    if value not in allowed:
-        raise LifecycleError(f"{what}: expected one of {list(allowed)}, got {value!r}")
-    return value
-
-
-def restrict_keys(d: dict, allowed: set, what) -> None:
-    unknown = set(d) - allowed
-    if unknown:
-        raise LifecycleError(f"{what}: unknown key(s): {sorted(unknown)}")
-
-
 def check_addr(value, what) -> str:
     if not isinstance(value, str) or not ADDR_RE.match(value):
         raise LifecycleError(f"{what}: not a valid address: {value!r}")
@@ -455,86 +401,14 @@ def norm_digest(value, what) -> str:
     return value.removeprefix("0x").lower()
 
 
-def load_yaml_file(path: str, what):
-    if not os.path.isfile(path):
-        raise LifecycleError(f"{what}: file not found: {path}")
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-    except yaml.YAMLError as exc:
-        raise LifecycleError(f"{what}: invalid YAML in {path}: {exc}")
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise LifecycleError(f"{what}: top-level YAML must be a mapping: {path}")
-    return data
-
-
-def emit(payload: dict, as_json: bool) -> None:
-    if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=False, default=str))
-    else:
-        for line in payload.get("lines", []):
-            print(line)
-
-
 # ---------------------------------------------------------------------------
 # case lock
 
-class CaseLock:
+class CaseLock(DirectoryLock):
     """Exclusive write lock for a case root; stale locks are stolen."""
 
-    STALE_AFTER = 600
-
     def __init__(self, root: str):
-        self.root = root
-        self.path = os.path.join(root, ".lifecycle.lock")
-        self.acquired = False
-
-    def _stale(self) -> bool:
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                pid = int(f.read().split()[0])
-            age = time.time() - os.path.getmtime(self.path)
-            if age > self.STALE_AFTER:
-                return True
-            try:
-                os.kill(pid, 0)
-                return False
-            except ProcessLookupError:
-                return True
-            except PermissionError:
-                return False  # live process owned by another user
-        except (OSError, ValueError, IndexError):
-            return True
-
-    def __enter__(self):
-        for attempt in range(2):
-            try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                os.write(fd, f"{os.getpid()} {now_iso()}".encode())
-                os.close(fd)
-                self.acquired = True
-                return self
-            except FileExistsError:
-                if attempt == 0 and self._stale():
-                    try:
-                        os.unlink(self.path)
-                    except FileNotFoundError:
-                        pass
-                    continue
-                raise LifecycleError(
-                    f"case root is locked by another session: {self.path}"
-                )
-        raise LifecycleError(f"could not acquire lock: {self.path}")
-
-    def __exit__(self, *exc):
-        if self.acquired:
-            try:
-                os.unlink(self.path)
-            except FileNotFoundError:
-                pass
-        return False
+        super().__init__(root, ".lifecycle.lock", LifecycleError, "case root")
 
 
 # ---------------------------------------------------------------------------
@@ -791,7 +665,7 @@ def verify_integrity(ctx: Ctx) -> None:
         rel = ev.get("path")
         try:
             p = safe_rel(ctx.root, rel, "recorded evidence")
-        except LifecycleError as exc:
+        except ToolError as exc:
             ctx.issue("invalid", str(exc))
             continue
         if not os.path.isfile(p):
@@ -811,7 +685,7 @@ def verify_integrity(ctx: Ctx) -> None:
             if "path" in inp:
                 try:
                     p = safe_rel(ctx.root, inp["path"], f"gate {g.get('id')} input")
-                except LifecycleError as exc:
+                except ToolError as exc:
                     ctx.issue("invalid", str(exc))
                     continue
                 if not os.path.isfile(p):
@@ -1913,7 +1787,7 @@ def rebuild_index(root: str) -> None:
         path = ledger_path(root, fid)
         try:
             fm, _ = load_ledger(root, fid)
-        except LifecycleError as exc:
+        except ToolError as exc:
             rows.append((fid, f"UNREADABLE: {exc}", "-", "-", "-", "-", "-"))
             hashes.append(f"{fid}: unreadable")
             continue
@@ -2009,8 +1883,9 @@ ARTIFACTS_SCHEMA = "whitehexlabs.audit-artifacts/v1"
 def warn_legacy_audit_config(root: str) -> None:
     """A legacy audit-skills.yaml only warns; audit execution moved out."""
     if os.path.isfile(os.path.join(root, AUDIT_CONFIG_NAME)):
-        print("NOTE: audit-skills.yaml is no longer executed by finding-lifecycle.\n"
-              "Use audit-orchestrator for audit execution.", file=sys.stderr)
+        print("NOTE: audit-skills.yaml is no longer executed by lifecycle.py.\n"
+              "Run audits with this skill's audit.py "
+              "(prepare/record/check/finalize).", file=sys.stderr)
 
 
 def cmd_register(a) -> int:
@@ -2250,7 +2125,7 @@ def cmd_ingest(a) -> int:
 
 
 # ---------------------------------------------------------------------------
-# import-audit: canonical handoff import (audit-orchestrator -> lifecycle)
+# import-audit: canonical handoff import (audit.py -> lifecycle)
 
 def _handoff_resolve(base: str, confine: str, rel, what: str) -> str:
     """Resolve a handoff-relative path (against `base`) while staying inside
@@ -2267,17 +2142,10 @@ def _handoff_resolve(base: str, confine: str, rel, what: str) -> str:
 
 
 def _verify_tree(path: str, expected_tree: str, expected_count, what: str) -> None:
-    """Deterministic tree digest identical to audit-orchestrator's."""
-    records = []
-    for dirpath, _dirnames, filenames in os.walk(path):
-        for name in filenames:
-            full = os.path.join(dirpath, name)
-            relp = os.path.relpath(full, path).replace(os.sep, "/")
-            records.append((relp, sha256_file(full)))
-    records.sort()
-    stream = "".join(f"{r}\0{d}\n" for r, d in records)
-    digest = sha256_bytes(stream.encode("utf-8"))
-    if digest != expected_tree or len(records) != expected_count:
+    """Deterministic tree digest (shared _kernel.tree_digest — the same
+    implementation the audit half uses to hash frozen artifact trees)."""
+    digest, count = tree_digest(path)
+    if digest != expected_tree or count != expected_count:
         raise LifecycleError(f"{what}: directory tree hash mismatch: {path}")
 
 
@@ -2387,7 +2255,7 @@ def render_handoff_draft(run_id: str, cand: dict, files: list) -> str:
 title: {json.dumps(cand.get("title"))}
 claim: {json.dumps(cand.get("claim"))}
 sources:
-  auditor: "audit-orchestrator"
+  auditor: "audit-lifecycle"
   original_finding_id: "{cand.get("id")}"
   audit_round: "{run_id}"
   files:
@@ -2401,12 +2269,41 @@ targets: []
 '''
 
 
+def discover_finalized_handoff(work_root: str, run_id=None) -> str:
+    """Locate a finalized handoff manifest under an audit work root.
+
+    With run_id, that exact run must exist and carry a handoff. Otherwise
+    the newest run with handoff/manifest.yaml wins (run ids are
+    timestamped, so lexical order is chronological order)."""
+    audits_dir = os.path.join(os.path.realpath(work_root), "audits")
+    if not os.path.isdir(audits_dir):
+        raise LifecycleError(
+            f"no audits/ directory under work root: {work_root!r} — pass the "
+            "audit.py --work-root, or use --handoff with an explicit manifest path")
+    runs = sorted(d for d in os.listdir(audits_dir) if d.startswith("run-"))
+    if run_id is not None:
+        if run_id not in runs:
+            raise LifecycleError(f"run id not found under {audits_dir}: {run_id}")
+        runs = [run_id]
+    found = [r for r in runs
+             if os.path.isfile(os.path.join(audits_dir, r, "handoff", "manifest.yaml"))]
+    if not found:
+        raise LifecycleError(
+            f"no finalized handoff found under {audits_dir} — run audit.py "
+            "finalize first")
+    return os.path.join(audits_dir, found[-1], "handoff", "manifest.yaml")
+
+
 def cmd_import_audit(a) -> int:
     root = require_case(a)
     warn_legacy_audit_config(root)
-    m = verify_handoff(a.handoff)
+    if bool(a.handoff) == bool(a.work_root):
+        raise LifecycleError(
+            "give exactly one of --handoff <manifest.yaml> or --work-root <dir>")
+    handoff = a.handoff or discover_finalized_handoff(a.work_root, a.run_id)
+    m = verify_handoff(handoff)
     run_id = m["run_id"]
-    manifest_path = os.path.realpath(a.handoff)
+    manifest_path = os.path.realpath(handoff)
     manifest_hash = sha256_file(manifest_path)
     hdir = os.path.dirname(manifest_path)
     rdir = os.path.dirname(hdir)  # audits/<run-id>/
@@ -2672,7 +2569,7 @@ def merge_creates_cycle(root: str, fid: str, into: str) -> bool:
         seen.add(cur)
         try:
             other, _ = load_ledger(root, cur)
-        except LifecycleError:
+        except ToolError:
             raise LifecycleError(f"merge target unreadable: {cur}")
         cur = other.get("duplicate_of")
     return False
@@ -2857,7 +2754,7 @@ def cmd_resume(a) -> int:
             doc, _ = load_ledger(root, fid)
             ctx = Ctx(root, program, doc)
             verify_integrity(ctx)
-        except LifecycleError as exc:
+        except ToolError as exc:
             lines.append(f"{fid}: UNREADABLE — {exc}")
             report["findings"].append({"id": fid, "error": str(exc)})
             structural += 1
@@ -3071,7 +2968,7 @@ def cmd_export(a) -> int:
                 continue
             try:
                 odoc, _ = load_ledger(root, other)
-            except LifecycleError:
+            except ToolError:
                 continue
             if STAGES.index(odoc["stage"]) >= STAGES.index("TRIAGED"):
                 withheld.append((other, odoc["stage"], odoc["disposition"],
@@ -3468,10 +3365,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_ingest)
 
     sp = sub.add_parser("import-audit",
-                        help="import a finalized audit-orchestrator handoff bundle")
+                        help="import a finalized handoff bundle from this skill's audit half")
     sp.add_argument("--case-root", required=True)
-    sp.add_argument("--handoff", required=True,
-                    help="path to the finalized handoff/manifest.yaml")
+    sp.add_argument("--handoff",
+                    help="path to a finalized handoff/manifest.yaml")
+    sp.add_argument("--work-root",
+                    help="audit work root; auto-discovers the newest finalized handoff")
+    sp.add_argument("--run-id", help="with --work-root: import this specific run")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_import_audit)
 
@@ -3652,7 +3552,7 @@ def main(argv=None) -> int:
             print(json.dumps({"gate": gf.gate_id, "status": "FAIL",
                               "issues": gf.issues, "next_steps": gf.next_steps}, indent=2))
         return EXIT_GATE
-    except LifecycleError as exc:
+    except ToolError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     except BrokenPipeError:

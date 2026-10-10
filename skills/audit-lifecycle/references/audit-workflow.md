@@ -42,8 +42,8 @@ audit prepare --work-root <dir> [--new]
 ```
 
 Validates the config (strict schema, unknown keys rejected, scope must stay
-inside `target_root`, duplicate skills rejected, the orchestrator itself and
-finding-lifecycle rejected as skill entries, empty skills/scope are errors —
+inside `target_root`, duplicate skills rejected, this skill's own SKILL.md
+rejected as a skill entry, empty skills/scope are errors —
 an empty configured audit never falls back to report import), hashes every
 in-scope target file, and creates the batch with one step per configured
 skill. Each step gets `step.yaml`, `execution-prompt.md` and `work/`. A
@@ -138,7 +138,7 @@ Then author one `candidates/A-XXX.yaml` per consolidated root cause
 (schema `whitehexlabs.audit-candidate/v1`; sources reference the canonical
 artifact manifests by relative path and artifact ID). Cross-skill
 root-cause dedup here is NOT bounty prior-art eligibility — that check
-lives in finding-lifecycle against the project's published audits.
+lives in the lifecycle half against the project's published audits.
 
 ## 6. FINALIZE
 
@@ -157,10 +157,10 @@ candidate copies. Finalization is idempotent and afterwards immutable:
 Audit complete.
 Aggregated report: <analysis.md path>
 Finalized handoff: <manifest.yaml path>
-You can stop here or import the handoff into finding-lifecycle.
+You can stop here or import the handoff into the lifecycle half.
 ```
 
-Do not automatically invoke finding-lifecycle — stopping here is a
+Do not automatically continue into the lifecycle half — stopping here is a
 first-class workflow.
 
 ## 7. When things change

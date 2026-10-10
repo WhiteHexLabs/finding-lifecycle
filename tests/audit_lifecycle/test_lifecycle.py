@@ -1,4 +1,4 @@
-"""Behavioral acceptance tests for the finding-lifecycle CLI.
+"""Behavioral acceptance tests for the lifecycle half (lifecycle.py).
 
 Covers the ten scenarios from plan.md section 5 using stdlib unittest,
 exercising the real CLI via subprocess in temporary directories.
@@ -17,8 +17,8 @@ import zipfile
 import yaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SCRIPT = os.path.join(REPO, "skills", "finding-lifecycle", "scripts", "lifecycle.py")
-TEMPLATE_RUNNER = os.path.join(REPO, "skills", "finding-lifecycle", "templates",
+SCRIPT = os.path.join(REPO, "skills", "audit-lifecycle", "scripts", "lifecycle.py")
+TEMPLATE_RUNNER = os.path.join(REPO, "skills", "audit-lifecycle", "templates",
                                 "poc", "setup_and_run.sh")
 
 TARGET_ADDR = "0x" + "11" * 20

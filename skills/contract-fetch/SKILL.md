@@ -1,6 +1,6 @@
 ---
 name: contract-fetch
-description: Pre-audit batch source fetching from block explorers. Transcribes bounty-platform Assets-in-Scope rows into a validated target list, fetches verified sources via Etherscan V2, reconstructs a compilable Foundry workspace, and proves local code byte-identical to the explorer's verified code (runtime bytecode equality plus source-identity hashes), emitting a sources-manifest for audit-orchestrator.
+description: Pre-audit batch source fetching from block explorers. Transcribes bounty-platform Assets-in-Scope rows into a validated target list, fetches verified sources via Etherscan V2, reconstructs a compilable Foundry workspace, and proves local code byte-identical to the explorer's verified code (runtime bytecode equality plus source-identity hashes), emitting a sources-manifest for the audit half of audit-lifecycle.
 ---
 
 # contract-fetch
@@ -11,8 +11,8 @@ workspace. A Python CLI enforces the pipeline gates
 `references/workflow.md` before operating a stage).
 
 This skill **never audits and never modifies downloaded sources**. It produces
-target workspaces for `audit-orchestrator`; findings belong to
-`finding-lifecycle`.
+target workspaces for `audit-lifecycle`; findings belong to its
+lifecycle half.
 
 **Red lines (always):** never edit a reconstructed `.sol` file (compilation is
 steered only through generated foundry.toml/remappings; a tree that does not
@@ -75,7 +75,7 @@ exit `1` when any target failed that stage (successful targets still advance);
   `--refresh <address>` busts a single stale entry.
 - On any FAILED target: exclude it in targets.yaml **with a reason** or fix the
   row; the manifest records failures honestly, `check` blocks until resolved.
-- Hand off to audit-orchestrator with one work-root per READY target:
+- Hand off to audit-lifecycle (audit half) with one work-root per READY target:
   `target_root: <fetch-root>/<manifest src path>` (see `references/workflow.md`).
 
 ## Repository layout

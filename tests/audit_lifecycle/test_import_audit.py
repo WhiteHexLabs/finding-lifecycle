@@ -1,7 +1,8 @@
 """Tests for `import-audit` (plan.md section 57): verification, immutable
-copy, idempotency, scaffolding, and workspace independence.
+copy, idempotency, scaffolding, workspace independence, and --work-root
+handoff auto-discovery.
 
-Handoffs are produced by the real audit-orchestrator CLI."""
+Handoffs are produced by the real audit half (audit.py) of this skill."""
 
 import json
 import os
@@ -19,7 +20,7 @@ except ImportError:
     from test_lifecycle import Base, FINDING_SRC, PROGRAM, run, wfile, wyaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-AUDIT = os.path.join(REPO, "skills", "audit-orchestrator", "scripts", "audit.py")
+AUDIT = os.path.join(REPO, "skills", "audit-lifecycle", "scripts", "audit.py")
 
 CANDIDATE_SCHEMA = "whitehexlabs.audit-candidate/v1"
 ANALYSIS_SECTIONS = [
@@ -260,7 +261,7 @@ class TestImportAudit(Base):
         text = "\n".join(l for l in open(draft, encoding="utf-8").read().splitlines()
                          if not l.startswith("#"))
         doc = yaml.safe_load(text)
-        self.assertEqual(doc["sources"]["auditor"], "audit-orchestrator")
+        self.assertEqual(doc["sources"]["auditor"], "audit-lifecycle")
         self.assertEqual(doc["sources"]["original_finding_id"], "A-001")
         self.assertEqual(doc["sources"]["audit_round"], self.rid)
         files = [f["path"] for f in doc["sources"]["files"]]
@@ -310,6 +311,85 @@ class TestImportAudit(Base):
         fid = json.loads(r.stdout)["id"]
         ev = os.listdir(os.path.join(self.root, "evidence", fid, "sources"))
         self.assertIn("analysis.md", ev)
+
+
+class TestImportAuditWorkRootDiscovery(Base):
+    """--work-root auto-discovers the newest finalized handoff so the
+    finalize → import step needs no hand-written manifest path."""
+
+    def setUp(self):
+        super().setUp()
+        self.work, self.rid, self.handoff = make_handoff(self.tmp, "wr")
+
+    def add_finalized_run(self, tag, body="second run root cause"):
+        rid = json.loads(
+            arun(["prepare", "--new", "--work-root", self.work, "--json"]).stdout
+        )["run_id"]
+        for n in (1, 2):
+            out = os.path.join(self.work, "audits", rid, "steps", str(n), "work")
+            report = wfile(os.path.join(out, f"report-{n}.md"),
+                           f"# report {n}\n\nfinding: share price inflation\n")
+            log = wfile(os.path.join(out, f"run-{n}.log"), f"ran {n}\n")
+            res = wyaml(os.path.join(self.tmp, f"res-{tag}-{n}.yaml"),
+                        {"schema": "whitehexlabs.audit-result/v1",
+                         "status": "COMPLETED",
+                         "note": f"skill {n} covered the scope; one candidate found",
+                         "primary": {"report": report, "log": log},
+                         "artifacts": []})
+            r = arun(["record", "--work-root", self.work, "--step", n,
+                      "--input", res, "--expected-revision", n])
+            assert r.returncode == 0, r.stderr
+        finalize_with(self.work, rid, body=body)
+        return rid
+
+    def test_discovers_newest_finalized_handoff(self):
+        rid2 = self.add_finalized_run("second")
+        r = run(["import-audit", "--case-root", self.root,
+                 "--work-root", self.work, "--json"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["run_id"], rid2)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.root, "imports", "audit", rid2, "manifest.yaml")))
+        self.assertFalse(os.path.isdir(os.path.join(self.root, "imports",
+                                                    "audit", self.rid)))
+
+    def test_run_id_selects_a_specific_run(self):
+        self.add_finalized_run("second")
+        r = run(["import-audit", "--case-root", self.root, "--work-root", self.work,
+                 "--run-id", self.rid, "--json"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["run_id"], self.rid)
+
+    def test_work_root_without_finalized_handoff_fails(self):
+        work, _rid = build_prefinalized(self.tmp, "unfin")  # recorded, never finalized
+        r = run(["import-audit", "--case-root", self.root, "--work-root", work])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("finalize first", r.stderr)
+
+    def test_work_root_missing_audits_dir_fails(self):
+        empty = os.path.join(self.tmp, "empty-work")
+        os.makedirs(empty)
+        r = run(["import-audit", "--case-root", self.root, "--work-root", empty])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no audits/", r.stderr)
+
+    def test_unknown_run_id_fails(self):
+        r = run(["import-audit", "--case-root", self.root, "--work-root", self.work,
+                 "--run-id", "run-99991231-235959-999999-zzzz"])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("run id not found", r.stderr)
+
+    def test_handoff_and_work_root_are_mutually_exclusive(self):
+        r = run(["import-audit", "--case-root", self.root, "--work-root", self.work,
+                 "--handoff", self.handoff])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("exactly one", r.stderr)
+
+    def test_neither_handoff_nor_work_root_fails(self):
+        r = run(["import-audit", "--case-root", self.root])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("exactly one", r.stderr)
 
 
 if __name__ == "__main__":

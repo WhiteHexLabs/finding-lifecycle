@@ -6,8 +6,8 @@ PoC bars and rejection causes: references/platform-standards.md. Two red lines
 apply at every stage: **never modify target protocol code** (fix ideas go into
 the report's remediation attachment only; PoCs use separate attack contracts)
 and **never disclose publicly** (controlled private channels only).
-This skill never executes audit skills — use `audit-orchestrator` for that
-(entry 0A consumes its output).
+The lifecycle half never executes audit skills — that is the audit half of
+this skill (`scripts/audit.py`); entry 0A consumes its output.
 
 Conventions: `lc()` is `python3 <skill-root>/scripts/lifecycle.py`. Every
 mutating command needs `--case-root` and `--expected-revision` (the current
@@ -46,9 +46,11 @@ become blockers — neither is a technical refutation.
 
 ### Entry 0A — canonical audit handoff (`import-audit`)
 
-When `audit-orchestrator` finished a run and finalized its handoff:
+When the audit half (`audit.py`) finished a run and finalized its handoff:
 
 ```bash
+lc import-audit --case-root <dir> --work-root <audit work-root>
+# or with an explicit manifest path:
 lc import-audit --case-root <dir> --handoff <work-root>/audits/<run-id>/handoff/manifest.yaml
 ```
 
@@ -76,7 +78,7 @@ directory covering `audit/` (its name-based discovery would scaffold a
 duplicate draft — orchestrator output enters here via 0A only). One TODO
 draft per candidate is scaffolded at
 `ingest/<run-id>/finding-source.A-001.yaml` with provenance pre-filled
-(auditor `audit-orchestrator`, original id, audit round, imported files);
+(auditor `audit-lifecycle`, original id, audit round, imported files);
 every prescreen stays UNKNOWN/TODO — imports never register or pre-screen.
 Zero-candidate handoffs import fine (analysis preserved, no drafts).
 
@@ -641,9 +643,9 @@ Routine inspection: `lc resume --case-root <dir>` (also rebuilds a broken index)
 ## 9. Boundaries of this version
 
 EVM + Foundry fork only; entry-point agnostic (any audit output that yields a
-claim + targets works). This skill never executes audits — the sibling
-`audit-orchestrator` skill runs configured audit skills and hands over a
-finalized bundle (§0A). Material platforms are built in with fixed form
+claim + targets works). The lifecycle half never executes audits — the audit
+half of this skill (`scripts/audit.py`) runs configured audit skills and
+hands over a finalized bundle (§0A). Material platforms are built in with fixed form
 formats — Immunefi's three-file kit (`delivery.platform: immunefi`),
 HackenProof's fields/ four-field kit plus full write-up
 (`delivery.platform: hackenproof`), and the four contest platforms

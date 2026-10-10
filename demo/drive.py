@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Controlled local-chain exercise for the finding-lifecycle workflow.
+"""Controlled local-chain exercise for the finding-lifecycle half
+(audit-lifecycle skill).
 
 Implements plan.md section 5: "另用受控测试合约在本地链上构造成功与反证样例,
 验证完整流程". This validates the WORKFLOW only; it does not replace mainnet
@@ -43,7 +44,7 @@ import yaml
 
 DEMO = Path(__file__).resolve().parent
 REPO = DEMO.parent
-LC = [sys.executable, str(REPO / "skills" / "finding-lifecycle" / "scripts" / "lifecycle.py")]
+LC = [sys.executable, str(REPO / "skills" / "audit-lifecycle" / "scripts" / "lifecycle.py")]
 FORGE_STD_REF = "foundry-rs/forge-std@v1.9.7"
 SEED_ETH = 10
 STAKE_ETH = 1

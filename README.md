@@ -1,20 +1,28 @@
 # finding-lifecycle (repository)
 
-A three-Skill collection for smart-contract security work: assemble verified
-targets from block explorers, run the audits, then track each finding to a
-verified, privately submitted bounty report — with strict, hash-bound
+A two-Skill collection for smart-contract security work: assemble verified
+targets from block explorers, then run the audits and track each finding to
+a verified, privately submitted bounty report — with strict, hash-bound
 evidence contracts at every boundary.
 
 ```text
-skills/contract-fetch/       — transcribe bounty scope tables, fetch verified
-                               sources from explorers, build a compilable
-                               Foundry workspace, prove byte-identity, emit
-                               a sources-manifest
-skills/audit-orchestrator/   — run configured audit skills, freeze artifacts,
-                               aggregate by root cause, emit a versioned handoff
-skills/finding-lifecycle/    — import handoffs or arbitrary audit output and
-                               drive findings to submission
+skills/contract-fetch/    — transcribe bounty scope tables, fetch verified
+                            sources from explorers, build a compilable
+                            Foundry workspace, prove byte-identity, emit
+                            a sources-manifest
+skills/audit-lifecycle/   — audit half: run configured audit skills, freeze
+                            artifacts, aggregate by root cause, emit a
+                            versioned handoff; lifecycle half: import the
+                            handoff (or arbitrary audit output) and drive
+                            findings to submission
 ```
+
+`audit-orchestrator` and `finding-lifecycle` were originally one skill,
+were split into two, and have been merged back as `audit-lifecycle`: the
+handoff bundle was their only interface (already machine-verified end to
+end), so the merge removes the skill switch and the hand-written
+`import-audit --handoff` path — `finalize` flows straight into
+`import-audit --work-root` inside one skill.
 
 ## Which skill do I need?
 
@@ -24,16 +32,18 @@ Need the target protocol's sources locally (pre-audit)?
   → verify → manifest → check)
 
 Only want an audit?
-→ skills/audit-orchestrator (prepare → record → check → aggregate → finalize)
+→ skills/audit-lifecycle, audit half (prepare → record → check → aggregate
+  → finalize — a first-class stopping point)
 
 Already have an audit result / finding?
-→ skills/finding-lifecycle (import-audit | ingest | register → advance → submit)
+→ skills/audit-lifecycle, lifecycle half (import-audit | ingest | register
+  → advance → submit)
 
 Want the complete flow?
 → skills/contract-fetch (verified Foundry workspace) — use its manifest src
-  paths as the orchestrator's target_root
-→ skills/audit-orchestrator → finalize
-→ skills/finding-lifecycle import-audit --handoff <…>/handoff/manifest.yaml
+  paths as the audit half's target_root
+→ skills/audit-lifecycle: audit.py finalize
+  → lifecycle.py import-audit --work-root <audit work-root>
 ```
 
 ## Workspace layout (one parent per program)
@@ -43,10 +53,10 @@ under one parent per target program** — never a single shared root:
 
 ```text
 <program>/
-├── audit/                        # audit-orchestrator --work-root
+├── audit/                        # audit.py --work-root
 │   ├── audit-skills.yaml
 │   └── audits/<run-id>/handoff/manifest.yaml
-└── case/                         # finding-lifecycle --case-root
+└── case/                         # lifecycle.py --case-root
     ├── imports/audit/<run-id>/   # immutable copies written by import-audit
     ├── ingest/ · findings/ · evidence/ · packages/
     └── submission/               # `export` output: NN-<slug>-<SEVERITY>/ paste kits
@@ -55,7 +65,7 @@ under one parent per target program** — never a single shared root:
 Why siblings and not one root: `import-audit` copies the evidence, so the
 case survives deleting or moving `audit/` afterwards; the work-root is
 disposable (`prepare --new` batches accumulate there) while the case root is
-the long-lived submission ledger. Orchestrator output always enters via
+the long-lived submission ledger. Audit-half output always enters via
 `import-audit` (0A) — do not run 0B `ingest` with a `--scan-dir` that covers
 `audit/`: its name-based discovery would scaffold a duplicate draft.
 
@@ -92,7 +102,17 @@ explorer's code view.
 Docs: `skills/contract-fetch/references/` (discovery-sources, explorer-api,
 verification, workflow).
 
-## skills/audit-orchestrator
+## skills/audit-lifecycle
+
+One skill, two CLIs, one continuous flow. The audit half and the lifecycle
+half share a `scripts/_kernel.py` (hashing, atomic writes, the deterministic
+tree digest, the directory lock, YAML validation helpers); the handoff
+bundle (`whitehexlabs.audit-handoff/v1`) remains the internal boundary —
+hash-bound and machine-verified end to end by `import-audit`, which is why
+the disposable audit work-root and the long-lived case ledger stay
+independent.
+
+### Audit half (scripts/audit.py)
 
 Orchestrates configured local audit skills (`audit-skills.yaml`: target
 tree, scope, ordered SKILL.md list). The audit methodology always belongs
@@ -105,7 +125,7 @@ finalized handoff (`whitehexlabs.audit-handoff/v1`). Audit-only work stops
 at finalize — a first-class stopping point.
 
 ```bash
-A="python3 skills/audit-orchestrator/scripts/audit.py"
+A="python3 skills/audit-lifecycle/scripts/audit.py"
 $A prepare  --work-root <dir>          # also writes per-step execution-prompt.md
 $A record  --work-root <dir> --step 1 --input result.yaml --expected-revision N
 $A check   --work-root <dir>
@@ -113,10 +133,10 @@ $A check   --work-root <dir>
 $A finalize --work-root <dir> --expected-revision N
 ```
 
-Docs: `skills/audit-orchestrator/references/` (workflow, execution
+Docs: `skills/audit-lifecycle/references/` (audit-workflow, execution
 contract, artifact contract, handoff contract).
 
-## skills/finding-lifecycle
+### Lifecycle half (scripts/lifecycle.py)
 
 Post-audit lifecycle with an enforced eight-stage state machine
 (DISCOVERED → PRIOR_ART_CHECKED → CROSS_CHECKED → FORK_PROVEN → TRIAGED →
@@ -124,12 +144,16 @@ PACKAGED → SELF_REVIEWED → SUBMITTED), dispositions, blockers, reopen and
 appeals. It never executes audit skills. Entry modes:
 
 ```bash
-LC="python3 skills/finding-lifecycle/scripts/lifecycle.py"
-$LC import-audit --case-root <dir> --handoff <…>/handoff/manifest.yaml   # 0A
+LC="python3 skills/audit-lifecycle/scripts/lifecycle.py"
+$LC import-audit --case-root <dir> --work-root <audit work-root>         # 0A
 $LC ingest    --case-root <dir>                                          # 0B
 $LC register  --case-root <dir> --from finding-source.yaml               # 0C
 $LC export    --case-root <dir> --id F-… [--id F-…]                      # materials
 ```
+
+`import-audit --work-root` auto-discovers the newest finalized handoff
+(`--run-id` selects a specific run; `--handoff <path>` remains for explicit
+manifest paths), so the finalize → import step needs no hand-written path.
 
 Each finding keeps its PoC as a locally runnable project under
 `evidence/<id>/poc/` (re-verifiable with `forge test` even if never
@@ -161,35 +185,44 @@ and a fresh independent review. Declaring "no published audits" in the
 prior-art gate requires two discovery channels plus an independent
 confirmation — absence is the most expensive claim to get wrong.
 
-Docs: `skills/finding-lifecycle/references/` (workflow, contracts, handoff
-contract). Demo: `demo/drive.py` (controlled local-chain exercise).
+Docs: `skills/audit-lifecycle/references/` (workflow, contracts, handoff
+contract, platform standards). Demo: `demo/drive.py` (controlled local-chain
+exercise).
 
-## Migration from the combined skill
+## Migration history
 
-| Old combined command | New owner |
+The original combined skill was split into `audit-orchestrator` +
+`finding-lifecycle`, then merged back as `audit-lifecycle` (the handoff was
+their only interface and was already machine-verified end to end).
+
+| Old combined command | Current owner |
 |---|---|
-| `audit prepare` | `audit-orchestrator` (`audit.py prepare --work-root`) |
-| `audit record` | `audit-orchestrator` (`audit.py record`) |
-| `audit check` | `audit-orchestrator` (`audit.py check`) |
-| audit resume/recovery | `audit-orchestrator` (`audit.py prepare` recovers) |
-| audit aggregation + finalization | `audit-orchestrator` (`audit.py finalize`, new) |
-| `ingest` | `finding-lifecycle` (unchanged shape) |
-| `register` | `finding-lifecycle` (no longer gated by an audit batch) |
-| lifecycle `check/advance/close/reopen/record/resume/index` | `finding-lifecycle` (unchanged) |
-| `import-audit` | `finding-lifecycle` (new) |
+| `audit prepare` | `audit-lifecycle` audit half (`audit.py prepare --work-root`) |
+| `audit record` | `audit-lifecycle` audit half (`audit.py record`) |
+| `audit check` | `audit-lifecycle` audit half (`audit.py check`) |
+| audit resume/recovery | `audit-lifecycle` audit half (`audit.py prepare` recovers) |
+| audit aggregation + finalization | `audit-lifecycle` audit half (`audit.py finalize`) |
+| `ingest` | `audit-lifecycle` lifecycle half (unchanged shape) |
+| `register` | `audit-lifecycle` lifecycle half (not gated by an audit batch) |
+| lifecycle `check/advance/close/reopen/record/resume/index` | `audit-lifecycle` lifecycle half (unchanged) |
+| `import-audit` | `audit-lifecycle` lifecycle half (`--work-root` auto-discovery) |
 
-Compatibility: old unfinished audit batches resume under the new
-orchestrator (the legacy result shape and legacy frozen artifacts are still
-accepted; finalize adapts frozen copies into canonical manifests). A legacy
-`audit-skills.yaml` in a lifecycle case root only warns.
+Compatibility: old unfinished audit batches resume under the audit half
+(the legacy result shape and legacy frozen artifacts are still accepted;
+finalize adapts frozen copies into canonical manifests). A legacy
+`audit-skills.yaml` in a lifecycle case root only warns. The audit half's
+deprecated `--case-root` alias (from the split era) was removed at the
+merge — `--case-root` now exclusively means the lifecycle case root.
 
 ## Repository layout
 
 ```text
-skills/     the three independent Skills (no runtime imports between them;
-            file-based contracts are the integration boundaries:
-            sources-manifest → audit-orchestrator, handoff → finding-lifecycle)
-tests/      audit_orchestrator/ · finding_lifecycle/ · contract_fetch/ · integration/
+skills/     two independent Skills (no runtime imports between them; the
+            file-based sources-manifest is the only integration boundary:
+            contract-fetch → audit-lifecycle). Inside audit-lifecycle the
+            two CLIs share scripts/_kernel.py, and the hash-bound handoff
+            bundle is the internal boundary.
+tests/      audit_lifecycle/ · contract_fetch/ · integration/
 demo/       controlled local-chain exercise for the lifecycle pipeline
 docs/       design documents (contract-fetch-design.md)
 ```

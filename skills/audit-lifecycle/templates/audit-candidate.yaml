@@ -28,5 +28,5 @@ affected_code: []
 disagreements: []          # auditor disagreements, preserved verbatim
 coverage_gaps: []
 
-severity_hint: null        # advisory only; finding-lifecycle decides finally
+severity_hint: null        # advisory only; the lifecycle half decides finally
 confidence_hint: null

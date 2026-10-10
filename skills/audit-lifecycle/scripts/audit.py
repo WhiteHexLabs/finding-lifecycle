@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""audit-orchestrator CLI.
+"""audit-lifecycle CLI — the audit-orchestration half.
 
 Orchestrates configured local audit skills: config validation, ordered
 step execution bookkeeping, per-step execution prompts, artifact
 normalization/freezing, aggregated-analysis validation and a versioned
-handoff bundle for finding-lifecycle.
+handoff bundle imported by this skill's lifecycle.py.
 
 The CLI never executes skill content — the operator (the current session)
 reads each SKILL.md and follows it; `record` freezes the declared outcome
@@ -22,14 +22,11 @@ Design contracts (see references/*.md):
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import shutil
 import sys
-import tempfile
-import time
 import uuid
 from datetime import datetime, timezone
 
@@ -38,6 +35,28 @@ try:
 except ImportError:  # pragma: no cover
     print("audit.py requires PyYAML", file=sys.stderr)
     sys.exit(2)
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:  # direct execution from any cwd
+    sys.path.insert(0, _HERE)
+
+from _kernel import (  # noqa: E402  (shared kernel, same directory)
+    DirectoryLock,
+    GateFailure,
+    ToolError,
+    as_dict,
+    as_list,
+    as_str,
+    atomic_write,
+    check_enum,
+    emit,
+    load_yaml_file,
+    now_iso,
+    restrict_keys,
+    sha256_bytes,
+    sha256_file,
+    tree_digest,
+)
 
 # ---------------------------------------------------------------------------
 # constants
@@ -75,7 +94,7 @@ CANDIDATE_ID_RE = re.compile(r"^A-\d{3,}$")
 # Key-material markers rejected inside declared artifacts. Bare 64-hex
 # values (block/code/tx hashes) are ubiquitous legitimate audit evidence
 # and are deliberately not scanned here; the deep secrets scan with
-# justified exceptions happens in finding-lifecycle's PACKAGED gate.
+# justified exceptions happens in the lifecycle half's PACKAGED gate.
 SECRET_PATTERNS = [
     ("private_key_marker", re.compile(r"(?i)private[_ \-]?key\s*[:=]")),
     ("pem_block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
@@ -87,59 +106,13 @@ EXIT_OK, EXIT_GATE, EXIT_ERROR = 0, 1, 2
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 SELF_SKILL_MD = os.path.realpath(os.path.join(_HERE, os.pardir, "SKILL.md"))
-LIFECYCLE_SKILL_MD = os.path.realpath(os.path.join(
-    _HERE, os.pardir, os.pardir, "finding-lifecycle", "SKILL.md"))
 
 
 # ---------------------------------------------------------------------------
 # errors and small utilities
 
-class AuditError(Exception):
+class AuditError(ToolError):
     """Input or runtime error -> exit 2."""
-
-
-class GateFailure(Exception):
-    """Gate not passed -> exit 1."""
-
-    def __init__(self, gate_id, issues, next_steps=()):
-        super().__init__(gate_id)
-        self.gate_id = gate_id
-        self.issues = list(issues)
-        self.next_steps = list(next_steps)
-
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def atomic_write(path: str, data: str) -> None:
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".tmp-", suffix=".audit")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def safe_rel(root: str, rel, what="path") -> str:
@@ -155,115 +128,14 @@ def safe_rel(root: str, rel, what="path") -> str:
     return target
 
 
-def as_dict(value, what) -> dict:
-    if not isinstance(value, dict):
-        raise AuditError(f"{what}: expected a mapping, got {type(value).__name__}")
-    return value
-
-
-def as_list(value, what) -> list:
-    if not isinstance(value, list):
-        raise AuditError(f"{what}: expected a list, got {type(value).__name__}")
-    return value
-
-
-def as_str(value, what) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise AuditError(f"{what}: expected a non-empty string")
-    return value
-
-
-def check_enum(value, allowed, what):
-    if value not in allowed:
-        raise AuditError(f"{what}: expected one of {list(allowed)}, got {value!r}")
-    return value
-
-
-def restrict_keys(d: dict, allowed: set, what) -> None:
-    unknown = set(d) - allowed
-    if unknown:
-        raise AuditError(f"{what}: unknown key(s): {sorted(unknown)}")
-
-
-def load_yaml_file(path: str, what):
-    if not os.path.isfile(path):
-        raise AuditError(f"{what}: file not found: {path}")
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-    except yaml.YAMLError as exc:
-        raise AuditError(f"{what}: invalid YAML in {path}: {exc}")
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        raise AuditError(f"{what}: top-level YAML must be a mapping: {path}")
-    return data
-
-
-def emit(payload: dict, as_json: bool) -> None:
-    if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=False, default=str))
-    else:
-        for line in payload.get("lines", []):
-            print(line)
-
-
 # ---------------------------------------------------------------------------
 # work-root lock
 
-class WorkRootLock:
+class WorkRootLock(DirectoryLock):
     """Exclusive write lock for a work root; stale locks are stolen."""
 
-    STALE_AFTER = 600
-
     def __init__(self, root: str):
-        self.root = root
-        self.path = os.path.join(root, ".audit.lock")
-        self.acquired = False
-
-    def _stale(self) -> bool:
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                pid = int(f.read().split()[0])
-            age = time.time() - os.path.getmtime(self.path)
-            if age > self.STALE_AFTER:
-                return True
-            try:
-                os.kill(pid, 0)
-                return False
-            except ProcessLookupError:
-                return True
-            except PermissionError:
-                return False  # live process owned by another user
-        except (OSError, ValueError, IndexError):
-            return True
-
-    def __enter__(self):
-        for attempt in range(2):
-            try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                os.write(fd, f"{os.getpid()} {now_iso()}".encode())
-                os.close(fd)
-                self.acquired = True
-                return self
-            except FileExistsError:
-                if attempt == 0 and self._stale():
-                    try:
-                        os.unlink(self.path)
-                    except FileNotFoundError:
-                        pass
-                    continue
-                raise AuditError(
-                    f"work root is locked by another session: {self.path}")
-        raise AuditError(f"could not acquire lock: {self.path}")
-
-    def __exit__(self, *exc):
-        if self.acquired:
-            try:
-                os.unlink(self.path)
-            except FileNotFoundError:
-                pass
-        return False
+        super().__init__(root, ".audit.lock", AuditError, "work root")
 
 
 # ---------------------------------------------------------------------------
@@ -316,10 +188,9 @@ def load_audit_config(root: str):
         p = resolve_external_path(root, s, f"{AUDIT_CONFIG_NAME}: skills[{i}]")
         if p in skill_paths:
             raise AuditError(f"{AUDIT_CONFIG_NAME}: duplicate skill path: {s!r}")
-        if p in (SELF_SKILL_MD, LIFECYCLE_SKILL_MD):
+        if p == SELF_SKILL_MD:
             raise AuditError(
-                f"{AUDIT_CONFIG_NAME}: skills must not include the orchestrator or "
-                "finding-lifecycle itself")
+                f"{AUDIT_CONFIG_NAME}: skills must not include audit-lifecycle itself")
         skill_paths.append(p)
     return {"path": os.path.realpath(path), "target_root": target_root,
             "scope": scope_paths, "skills": skill_paths}, path
@@ -562,20 +433,6 @@ def ensure_prompt_for_next_step(root: str, run: dict) -> None:
 # ---------------------------------------------------------------------------
 # artifacts: hashing, manifests, verification
 
-def tree_digest(dirpath: str):
-    """Deterministic directory digest: sha256 over sorted
-    `<normalized-rel-posix-path>\\0<file-sha256>\\n` records. No mtimes."""
-    records = []
-    for dirpath_, _dirnames, filenames in os.walk(dirpath):
-        for name in filenames:
-            full = os.path.join(dirpath_, name)
-            rel = os.path.relpath(full, dirpath).replace(os.sep, "/")
-            records.append((rel, sha256_file(full)))
-    records.sort()
-    stream = "".join(f"{rel}\0{digest}\n" for rel, digest in records)
-    return sha256_bytes(stream.encode("utf-8")), len(records)
-
-
 def artifact_slug(name: str) -> str:
     slug = re.sub(r"[^0-9A-Za-z]+", "-", os.path.basename(name)).strip("-").lower()
     return slug or "artifact"
@@ -596,7 +453,7 @@ def verify_artifact_manifest(root: str, run: dict, step: int) -> list:
     issues = []
     try:
         m = load_manifest(root, run, step)
-    except AuditError as exc:
+    except ToolError as exc:
         return [f"step {step}: artifact manifest unreadable: {exc}"]
     sdir = step_dir(root, run["run_id"], step)
     if m.get("schema") != ARTIFACTS_SCHEMA:
@@ -668,7 +525,7 @@ def legacy_attempt_issues(root: str, run: dict, st: dict, step: int) -> list:
             continue
         try:
             p = safe_rel(root, spec["path"], f"step {step} {key}")
-        except AuditError as exc:
+        except ToolError as exc:
             issues.append(f"step {step}: {key}: {exc}")
             continue
         if not os.path.isfile(p):
@@ -1051,7 +908,7 @@ def load_candidates(root: str, run: dict, issues: list) -> list:
     for path in candidate_files(root, run):
         try:
             doc = validate_candidate(root, run, path)
-        except AuditError as exc:
+        except ToolError as exc:
             issues.append(str(exc))
             continue
         if doc["id"] in ids:
@@ -1148,7 +1005,7 @@ def handoff_issues(root: str, run: dict) -> list:
 # commands
 
 def require_work_root(a) -> str:
-    root = getattr(a, "work_root", None) or getattr(a, "case_root", None)
+    root = getattr(a, "work_root", None)
     if not root or not os.path.isdir(root):
         raise AuditError(f"work root directory not found: {root!r}")
     return os.path.realpath(root)
@@ -1156,26 +1013,6 @@ def require_work_root(a) -> str:
 
 def add_root_args(sp):
     sp.add_argument("--work-root", required=True, help="audit work root directory")
-    sp.add_argument("--case-root", help="deprecated alias for --work-root")
-
-
-def _merge_root_args(argv):
-    """When only the deprecated --case-root alias is present, feed its value
-    to --work-root (inserted after the subcommand name for argparse)."""
-    has_work = any(a == "--work-root" or a.startswith("--work-root=") for a in argv)
-    case_val = None
-    for j, a in enumerate(argv):
-        if a == "--case-root" and j + 1 < len(argv):
-            case_val = argv[j + 1]
-        elif a.startswith("--case-root="):
-            case_val = a.split("=", 1)[1]
-    if case_val is None or has_work:
-        return argv, False
-    sub = next((a for a in argv if not a.startswith("-")), None)
-    if sub is None:
-        return argv, False
-    i = argv.index(sub)
-    return argv[:i + 1] + ["--work-root", case_val] + argv[i + 1:], True
 
 
 def cmd_prepare(a) -> int:
@@ -1465,7 +1302,7 @@ def cmd_finalize(a) -> int:
             emit({"lines": [f"audit batch {rid} is already finalized; handoff verified intact",
                             f"aggregated report: {os.path.join(run_dir(root, rid), 'analysis.md')}",
                             f"finalized handoff: {handoff_manifest_path(root, run)}",
-                            "You can stop here or import the handoff into finding-lifecycle."],
+                            "You can stop here or import the handoff into the lifecycle half."],
                   "run_id": rid, "status": "FINALIZED", "idempotent": True}, a.json)
             return EXIT_OK
 
@@ -1490,7 +1327,7 @@ def cmd_finalize(a) -> int:
             if not os.path.isfile(manifest_path(root, rid, n)):
                 try:
                     synthesize_legacy_manifest(root, run, st, n)
-                except AuditError as exc:
+                except ToolError as exc:
                     issues.append(str(exc))
         issues += audit_artifact_issues(root, run)
         if issues:
@@ -1565,12 +1402,12 @@ def cmd_finalize(a) -> int:
     lines = ["Audit complete.",
              f"Aggregated report: {os.path.join(run_dir(root, rid), 'analysis.md')}",
              f"Finalized handoff: {handoff_manifest_path(root, run)}",
-             "You can stop here or import the handoff into finding-lifecycle:"]
+             "You can stop here or import the handoff into the lifecycle half:"]
     if cand_entries:
         for c in cand_entries:
             lines.append(f"  candidate {c['id']}")
         lines.append("  lifecycle.py import-audit --case-root <dir> "
-                     f"--handoff {handoff_manifest_path(root, run)}")
+                     f"--work-root {root}")
     else:
         lines.append("  zero candidates — record the conclusion and stop, or import "
                      "for provenance")
@@ -1624,10 +1461,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    raw = list(sys.argv[1:] if argv is None else argv)
-    argv, used_alias = _merge_root_args(raw)
-    if used_alias:
-        print("NOTE: --case-root is a deprecated alias; use --work-root", file=sys.stderr)
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
@@ -1647,7 +1481,7 @@ def main(argv=None) -> int:
             print(json.dumps({"gate": gf.gate_id, "status": "FAIL",
                               "issues": gf.issues, "next_steps": gf.next_steps}, indent=2))
         return EXIT_GATE
-    except AuditError as exc:
+    except ToolError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     except BrokenPipeError:

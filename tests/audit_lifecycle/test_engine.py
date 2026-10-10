@@ -57,16 +57,19 @@ class TestAuditConfig(AuditBase):
         self.assertIn("escapes target_root", r.stderr)
 
     def test_self_call_rejected(self):
-        self.write_config(skills=[os.path.join(REPO, "skills", "audit-orchestrator", "SKILL.md")])
+        self.write_config(skills=[os.path.join(REPO, "skills", "audit-lifecycle", "SKILL.md")])
         r = self.prepare()
         self.assertEqual(r.returncode, 2)
         self.assertIn("itself", r.stderr)
 
-    def test_lifecycle_skill_rejected(self):
-        self.write_config(skills=[os.path.join(REPO, "skills", "finding-lifecycle", "SKILL.md")])
+    def test_sibling_skill_not_rejected(self):
+        # only self-reference is rejected; the sibling skill (contract-fetch)
+        # is a legitimate configured audit skill like any other
+        self.write_config(skills=[os.path.join(REPO, "skills", "contract-fetch", "SKILL.md")])
         r = self.prepare()
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("itself", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual([s["status"] for s in out["steps"]], ["PENDING"])
 
     def test_missing_skill_blocks_step_but_batch_continues(self):
         missing = os.path.join(self.tmp, "skills", "gone", "SKILL.md")
@@ -94,13 +97,13 @@ class TestAuditConfig(AuditBase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("skill entry", r.stderr)
 
-    def test_deprecated_case_root_alias(self):
+    def test_case_root_alias_removed(self):
+        # --case-root now exclusively means the lifecycle case root; the old
+        # audit-side alias was dropped when the two skills merged
         self.write_config()
         r = run(["prepare", "--case-root", self.root, "--json"])
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("deprecated", r.stderr)
-        out = json.loads(r.stdout)
-        self.assertEqual(len(out["steps"]), 2)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("required: --work-root", r.stderr)
 
 
 # ---------------------------------------------------------------------------

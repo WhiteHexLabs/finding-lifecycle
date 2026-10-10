@@ -51,7 +51,7 @@ copy of the latest declared result; the per-attempt archive under
     `private key =`/`api key =`-style assignments and mnemonic/seed-phrase
     markers. Bare 64-hex values (block/code/tx hashes — ubiquitous
     legitimate evidence) are deliberately not scanned here; the deep
-    secrets scan with justified exceptions runs in finding-lifecycle's
+    secrets scan with justified exceptions runs in the lifecycle half's
     PACKAGED gate.
 
 ## Directory tree hashing

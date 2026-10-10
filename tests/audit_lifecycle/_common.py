@@ -1,4 +1,4 @@
-"""Shared helpers for audit-orchestrator tests."""
+"""Shared helpers for audit-lifecycle tests (audit half)."""
 
 import json
 import os
@@ -11,7 +11,7 @@ import unittest
 import yaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SCRIPT = os.path.join(REPO, "skills", "audit-orchestrator", "scripts", "audit.py")
+SCRIPT = os.path.join(REPO, "skills", "audit-lifecycle", "scripts", "audit.py")
 
 RESULT_SCHEMA = "whitehexlabs.audit-result/v1"
 CANDIDATE_SCHEMA = "whitehexlabs.audit-candidate/v1"

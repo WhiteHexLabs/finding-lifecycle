@@ -17,17 +17,18 @@ which turns that into a gated pipeline:
 3. **Consistency** — local code must be identical to the explorer's verified
    code: on-chain bytecode equality **and** source-line correspondence.
 
-The skill produces a `sources-manifest` that `audit-orchestrator` consumes
-directly. Pipeline position:
+The skill produces a `sources-manifest` that the audit half of
+`audit-lifecycle` consumes directly. Pipeline position:
 
 ```
-contract-fetch  (targets → verified Foundry workspace)
+contract-fetch   (targets → verified Foundry workspace)
       │  sources-manifest.yaml
       ▼
-audit-orchestrator  (--work-root, runs the audit skills)
+audit-lifecycle   audit half: audit.py --work-root (runs the audit skills)
       │  finalized handoff
       ▼
-finding-lifecycle   (per-finding ledger)
+                  lifecycle half: lifecycle.py (per-finding ledger,
+                  drives findings to private submission)
 ```
 
 Design language follows the two existing skills: one single-file Python CLI
@@ -45,7 +46,7 @@ transcribing the table are judgment calls that break every time a platform
 redesigns. Scraping is therefore **not** CLI functionality. The agent browses
 platform pages with its web tools and transcribes scope rows into
 `targets.yaml`; the CLI validates, ranks, fetches, assembles, builds, and
-verifies. Same split as `finding-lifecycle`'s "the CLI never fetches; copies +
+verifies. Same split as the lifecycle half's "the CLI never fetches; copies +
 hashes are your evidence" — except that here, once targets are structured, the
 fetching itself is deterministic and therefore belongs in the CLI.
 
@@ -77,7 +78,7 @@ never written into any file under the fetch root, cache, reports, or manifest.
 
 `contract-fetch` is a self-contained skill: single Python file, stdlib +
 PyYAML, no runtime imports from the sibling skills, no new third-party
-dependencies. Integration with `audit-orchestrator` is a file contract (the
+dependencies. Integration with `audit-lifecycle` is a file contract (the
 manifest), nothing else.
 
 ---
@@ -224,7 +225,7 @@ subcommands read `targets-selected.yaml` when present, else `targets.yaml`.
       artifacts/{explorer.json, input.json, output.json}
       out/                        # forge artifacts (generated)
   verification/<target-id>.yaml   # per-target consistency verdict (§7)
-  sources-manifest.yaml           # batch summary → audit-orchestrator (§8)
+  sources-manifest.yaml           # batch summary → audit-lifecycle audit half (§8)
   state.yaml                      # per-target pipeline state (§4.1)
 ```
 
@@ -533,7 +534,7 @@ targets:
 Excluded and failed targets appear in the manifest with their verdicts and
 reasons — the manifest is the honest batch record, not just the happy path.
 
-## 8.2 Handoff to audit-orchestrator
+## 8.2 Handoff to audit-lifecycle (audit half)
 
 Recommended wiring (one work-root per target, keeps the orchestrator's target
 modification guard scoped to one tree):
@@ -607,7 +608,7 @@ skills/contract-fetch/
 
 Mirrors the siblings: thesis paragraph + boundary statement ("this skill never
 audits and never modifies downloaded sources; it produces verified target
-workspaces for `audit-orchestrator`"), **Red lines (always)** (§1.2–1.4),
+workspaces for `audit-lifecycle`"), **Red lines (always)** (§1.2–1.4),
 **Entry modes** (0A empty dir → full pipeline; 0B resume a partially advanced
 fetch root), **Quick start** bash block, **Stages & gates** table
 (SELECTED→READY with Produce/Gate essence per stage), **Operating rules**,

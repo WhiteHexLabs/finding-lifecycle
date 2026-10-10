@@ -2,8 +2,8 @@
 
 Normative reference for `scripts/lifecycle.py`. Files are authoritative; the
 CLI only performs validated, locked, atomic, revision-checked transitions.
-This skill never executes audit skills (see references/handoff-contract.md
-for the audit-orchestrator boundary).
+The lifecycle half never executes audit skills (see
+references/handoff-contract.md for the boundary).
 
 ## 1. Case root layout
 
@@ -114,10 +114,11 @@ commands take `--expected-revision` (compare-and-swap against the ledger).
 
 ```text
 init       --case-root D [--program-yaml P] [--program-id X] [--rules-snapshot F]
-import-audit --case-root D --handoff manifest.yaml [--json]
-           verify a finalized audit-orchestrator handoff (schema, hashes,
+import-audit --case-root D (--handoff manifest.yaml | --work-root DIR [--run-id ID]) [--json]
+           verify a finalized handoff from this skill's audit half (schema, hashes,
            path confinement), copy immutable evidence under imports/audit/,
-           scaffold one TODO draft per candidate; never registers anything
+           scaffold one TODO draft per candidate; never registers anything;
+           --work-root auto-discovers the newest finalized handoff
 ingest     --case-root D [--scan-dir DIR] [--pattern audit] [--json]
            name-based discovery of audit artifacts -> TODO drafts under <root>/ingest/;
            no content parsing; `register` rejects unresolved TODO fields
@@ -203,14 +204,16 @@ exclusion interpretation stays with the reviewer, recorded per eligibility item.
 
 ## 8. Audit import contract (`import-audit`)
 
-This skill never executes audit skills. A legacy `audit-skills.yaml` found
+The lifecycle half never executes audit skills. A legacy `audit-skills.yaml` found
 in the case root only produces a warning on entry commands — nothing is
 gated, blocked or executed because of it; audit execution belongs to the
-sibling `audit-orchestrator` skill.
+audit half of this skill (scripts/audit.py).
 
-`import-audit --case-root D --handoff <manifest.yaml>` consumes one
+`import-audit --case-root D --handoff <manifest.yaml>` (or
+`--work-root <dir> [--run-id <id>]`, which auto-discovers the newest
+finalized handoff under the audit work root) consumes one
 FINALIZED handoff bundle (schema `whitehexlabs.audit-handoff/v1`; producer
-side: audit-orchestrator's references/handoff-contract.md). Verification
+side: references/handoff-contract.md, both halves in one file). Verification
 before any copying — no `--force`, any violation is exit 2:
 
 1. schema is exactly supported;
@@ -237,7 +240,7 @@ source tree is not copied.
 
 For each audit candidate exactly one draft is scaffolded at
 `ingest/<run-id>/finding-source.A-XXX.yaml`: provenance pre-filled
-(auditor `audit-orchestrator`, original finding id, audit round, imported
+(auditor `audit-lifecycle`, original finding id, audit round, imported
 file references) and every prescreen aspect left UNKNOWN with TODO
 evidence/explanation — no bounty pre-screen answers are guessed. Nothing is
 registered automatically; the existing `register` gates reject unresolved
